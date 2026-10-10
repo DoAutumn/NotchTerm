@@ -27,7 +27,7 @@ struct WelcomeView: View {
 
             HStack(spacing: 12) {
                 Toggle(isOn: $model.settings.expandOnHover) {
-                    Text("Expand on hover")
+                    Text("Enlarge on hover")
                         .font(.system(size: 10.5, weight: .medium))
                         .foregroundStyle(.white.opacity(0.68))
                 }

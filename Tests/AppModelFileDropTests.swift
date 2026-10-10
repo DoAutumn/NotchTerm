@@ -178,11 +178,12 @@ struct AppModelFileDropTests {
             expect(model.selectedSection == .shelf, "setting compactContent to shelf updates selectedSection in compact mode")
 
             model.hoverChanged(true)
-            expect(model.mode == .expanded, "hover expands compact notch")
-            expect(model.selectedSection == .shelf, "hover expands to configured shelf section")
+            expect(model.mode == .compact, "hover does not expand compact notch into expanded mode")
+            expect(model.isHovered, "hover sets isHovered state")
 
-            model.collapse(force: true)
-            expect(model.mode == .compact, "collapse restores compact mode")
+            model.hoverChanged(false)
+            expect(!model.isHovered, "unhover clears isHovered state")
+            expect(model.mode == .compact, "compact mode remains intact")
 
             model.notchClicked()
             expect(model.mode == .expanded, "click expands compact notch")

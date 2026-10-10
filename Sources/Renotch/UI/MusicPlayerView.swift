@@ -7,18 +7,13 @@ struct MusicPlayerView: View {
 
     var body: some View {
         HStack(spacing: 14) {
-            AlbumArtworkView(artwork: music.artwork, cornerRadius: 12)
-                .frame(width: 82, height: 82)
-                .shadow(color: .black.opacity(0.45), radius: 10, y: 5)
-                .overlay(alignment: .bottomLeading) {
-                    if music.isPlaying, music.activeSource == .appleMusic {
-                        AppleMusicBadge()
-                            .padding(5)
-                            .transition(.opacity.combined(with: .scale(scale: 0.85)))
-                    }
-                }
-                .animation(.easeOut(duration: 0.2), value: music.isPlaying)
-                .animation(.easeOut(duration: 0.2), value: music.activeSource)
+            AlbumArtworkView(
+                artwork: music.artwork,
+                cornerRadius: 12,
+                showGlow: true,
+                isPlaying: music.isPlaying
+            )
+            .frame(width: 82, height: 82)
 
             if let track = music.track {
                 playerDetails(track)
@@ -234,47 +229,48 @@ struct MusicPlayerView: View {
     }
 }
 
-/// Source badge pinned to the bottom-left corner of the album artwork while
-/// Apple Music is playing: the classic beamed-notes glyph with the Apple
-/// Music gradient on a small blurred tile, sized to stay out of the way of
-/// the artwork itself.
-struct AppleMusicBadge: View {
-    /// Tile edge length; every inner metric scales from this so the badge
-    /// can shrink onto compact artwork without losing its proportions.
-    var size: CGFloat = 17
-
-    private var cornerRadius: CGFloat { size * 5 / 17 }
-
-    var body: some View {
-        Image(systemName: "music.note")
-            .font(.system(size: size * 9 / 17, weight: .bold))
-            .foregroundStyle(
-                LinearGradient(
-                    colors: [
-                        Color(red: 0.98, green: 0.35, blue: 0.47),
-                        Color(red: 0.98, green: 0.48, blue: 0.33)
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-            )
-            .frame(width: size, height: size)
-            .background(
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(.black.opacity(0.55))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .stroke(Color.white.opacity(0.12), lineWidth: 0.5)
-            )
-            .accessibilityLabel("Playing from Apple Music")
-    }
-}
-
 struct AlbumArtworkView: View {
     let artwork: NSImage?
     var cornerRadius: CGFloat = 10
+    var showGlow: Bool = false
+    var isPlaying: Bool = true
+
     var body: some View {
+        ZStack {
+            if showGlow, let artwork {
+                ambientGlow(artwork)
+            }
+
+            mainArtwork
+        }
+    }
+
+    @ViewBuilder
+    private func ambientGlow(_ image: NSImage) -> some View {
+        ZStack {
+            // Broad ambient colored wash matching the artwork colors
+            Image(nsImage: image)
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+                .blur(radius: 20)
+                .scaleEffect(1.18)
+                .opacity(isPlaying ? 0.65 : 0.28)
+                .offset(y: 4)
+
+            // Radiant inner bloom
+            Image(nsImage: image)
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+                .blur(radius: 10)
+                .scaleEffect(1.06)
+                .opacity(isPlaying ? 0.85 : 0.38)
+                .offset(y: 2)
+        }
+        .allowsHitTesting(false)
+        .animation(.easeInOut(duration: 0.35), value: isPlaying)
+    }
+
+    private var mainArtwork: some View {
         Group {
             if let artwork {
                 Image(nsImage: artwork)
@@ -292,8 +288,9 @@ struct AlbumArtworkView: View {
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .stroke(Color.white.opacity(0.1), lineWidth: 0.7)
+                .stroke(Color.white.opacity(0.12), lineWidth: 0.7)
         )
+        .shadow(color: .black.opacity(showGlow ? 0.35 : 0.0), radius: 8, y: 4)
     }
 }
 

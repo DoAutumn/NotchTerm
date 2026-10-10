@@ -5,12 +5,15 @@ struct NotchView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHovering = false
-    @State private var isPressed = false
+
+    private var isEnlargedOnHover: Bool {
+        model.mode == .compact && model.isHovered && model.settings.expandOnHover
+    }
 
     private var topCornerRadius: CGFloat {
         switch model.mode {
         case .compact:
-            return CGFloat(model.settings.resolvedCompactCornerRadius)
+            return CGFloat(model.settings.resolvedCompactCornerRadius) + (isEnlargedOnHover ? 2 : 0)
         case .expanded, .fileDrop, .success:
             return 18
         case .focusTakeover:
@@ -21,7 +24,7 @@ struct NotchView: View {
     private var bottomCornerRadius: CGFloat {
         switch model.mode {
         case .compact:
-            return CGFloat(model.settings.resolvedCompactCornerRadius)
+            return CGFloat(model.settings.resolvedCompactCornerRadius) + (isEnlargedOnHover ? 4 : 0)
         case .expanded:
             return 26
         case .fileDrop, .success:
@@ -40,7 +43,7 @@ struct NotchView: View {
 
     private var shadowOpacity: Double {
         switch model.mode {
-        case .compact: return isHovering ? 0.22 : 0.08
+        case .compact: return isEnlargedOnHover ? 0.28 : 0.08
         case .expanded: return 0.42
         case .fileDrop: return 0.65
         case .success: return 0.45
@@ -50,7 +53,7 @@ struct NotchView: View {
 
     private var shadowRadius: CGFloat {
         switch model.mode {
-        case .compact: return isHovering ? 10 : 4
+        case .compact: return isEnlargedOnHover ? 16 : 4
         case .expanded: return 16
         case .fileDrop: return 22
         case .success: return 18
@@ -126,32 +129,17 @@ struct NotchView: View {
 
     private var unifiedIslandSurface: some View {
         styledUnifiedSurface
-            .scaleEffect(
-                isPressed ? 0.96 : (isHovering && model.mode == .compact ? 1.025 : 1.0),
-                anchor: .top
-            )
-            .contentShape(Rectangle())
+            .contentShape(notchShape)
             .onTapGesture {
                 if model.mode == .compact {
-                    model.notchClicked()
+                    NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
+                    withAnimation(DynamicNotchSprings.fluidExpand) {
+                        model.notchClicked()
+                    }
                 }
             }
-            .onLongPressGesture(minimumDuration: 0.25, pressing: { pressing in
-                withAnimation(DynamicNotchSprings.rubberBounce) {
-                    isPressed = pressing
-                }
-                if pressing {
-                    NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
-                }
-            }, perform: {
-                if model.mode == .compact {
-                    model.expand(section: nil, pin: true, preferSelectedSection: true)
-                    NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
-                }
-            })
             .animation(containerAnimation, value: model.currentSize)
             .animation(containerAnimation, value: model.mode)
-            .animation(reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.75), value: isHovering)
             .animation(.easeInOut(duration: 0.28), value: model.settings.resolvedAppearance)
             .animation(.easeOut(duration: 0.16), value: model.settings.resolvedGlassBlurRadius)
             .onHover { hovering in
@@ -160,7 +148,9 @@ struct NotchView: View {
                 if hovering {
                     NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
                 }
-                model.hoverChanged(hovering)
+                withAnimation(DynamicNotchSprings.fluidHover) {
+                    model.hoverChanged(hovering)
+                }
             }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
                 model.removeMissingShelfFiles()
@@ -178,6 +168,12 @@ struct NotchView: View {
             content
                 .background(Color.black.padding(-50))
                 .mask(notchShape.padding(.horizontal, 0.5))
+                .overlay {
+                    notchShape
+                        .stroke(Color.white.opacity(isEnlargedOnHover ? 0.12 : 0.0), lineWidth: 0.6)
+                        .padding(.horizontal, 0.5)
+                        .allowsHitTesting(false)
+                }
                 .shadow(color: shadowColor, radius: shadowRadius)
         case .liquidGlass:
             if #available(macOS 26.0, *) {
@@ -189,7 +185,7 @@ struct NotchView: View {
                     .mask(notchShape.padding(.horizontal, 0.5))
                     .overlay {
                         notchShape
-                            .stroke(Color.white.opacity(0.38), lineWidth: 0.8)
+                            .stroke(Color.white.opacity(isEnlargedOnHover ? 0.52 : 0.38), lineWidth: 0.8)
                             .padding(.horizontal, 0.8)
                             .allowsHitTesting(false)
                     }
@@ -230,7 +226,7 @@ struct NotchView: View {
                     activity: model.activity,
                     todos: model.todos
                 )
-                .frame(width: notchWidth, height: model.settings.compactHeight, alignment: .center)
+                .frame(width: notchWidth, height: notchHeight, alignment: .center)
                 .transition(
                     .asymmetric(
                         insertion: .opacity.combined(with: .scale(scale: 0.95)),

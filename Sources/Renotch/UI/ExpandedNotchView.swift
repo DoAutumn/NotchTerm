@@ -145,7 +145,9 @@ struct ExpandedNotchView: View {
             }
 
             Button {
-                model.collapse(force: true)
+                withAnimation(DynamicNotchSprings.fluidCollapse) {
+                    model.collapse(force: true)
+                }
             } label: {
                 Image(systemName: "chevron.up")
                     .font(.system(size: 10, weight: .bold))

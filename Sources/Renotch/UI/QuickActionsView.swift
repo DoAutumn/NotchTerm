@@ -12,7 +12,9 @@ struct QuickActionsView: View {
     var body: some View {
         LazyVGrid(columns: columns, spacing: 8) {
             ActionTile(title: "Face ID", icon: "faceid", tint: .notchAccent) {
-                model.collapse(force: true)
+                withAnimation(DynamicNotchSprings.fluidCollapse) {
+                    model.collapse(force: true)
+                }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
                     model.triggerFaceIDGlance()
                 }

@@ -10,14 +10,6 @@ struct CompactMusicView: View {
         HStack(spacing: 9) {
             AlbumArtworkView(artwork: music.artwork, cornerRadius: 6)
                 .frame(width: 24, height: 24)
-                .overlay(alignment: .bottomLeading) {
-                    if music.activeSource == .appleMusic {
-                        AppleMusicBadge(size: 10)
-                            .padding(1.5)
-                            .transition(.opacity.combined(with: .scale(scale: 0.85)))
-                    }
-                }
-                .animation(.easeOut(duration: 0.2), value: music.activeSource)
 
             if showsTrackInfo {
                 VStack(alignment: .leading, spacing: 1) {

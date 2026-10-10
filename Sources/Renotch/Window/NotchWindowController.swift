@@ -6,6 +6,7 @@ final class NotchWindowController: NSWindowController {
     private let model: AppModel
     private let screenManager: ScreenManager
     private var outsideClickMonitor: Any?
+    private var localClickMonitor: Any?
 
     init(model: AppModel, screenManager: ScreenManager) {
         self.model = model
@@ -41,6 +42,10 @@ final class NotchWindowController: NSWindowController {
         outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
             Task { @MainActor in self?.handleGlobalClick(event) }
         }
+        localClickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
+            Task { @MainActor in self?.handleGlobalClick(event) }
+            return event
+        }
         applyConfiguration(animated: false)
     }
 
@@ -50,6 +55,7 @@ final class NotchWindowController: NSWindowController {
 
     deinit {
         if let outsideClickMonitor { NSEvent.removeMonitor(outsideClickMonitor) }
+        if let localClickMonitor { NSEvent.removeMonitor(localClickMonitor) }
     }
 
     func show() {

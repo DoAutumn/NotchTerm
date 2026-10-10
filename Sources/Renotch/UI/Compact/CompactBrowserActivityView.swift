@@ -102,25 +102,51 @@ struct ExpandedBrowserMediaView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 13) {
-                Group {
+                ZStack {
                     if let artwork {
-                        Image(nsImage: artwork)
-                            .resizable()
-                            .aspectRatio(contentMode: .fill)
-                    } else {
                         ZStack {
-                            Color(red: 0.78, green: 0.05, blue: 0.08)
-                            Image(systemName: "play.fill")
-                                .font(.system(size: 18, weight: .bold))
-                                .foregroundStyle(.white)
+                            Image(nsImage: artwork)
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
+                                .blur(radius: 18)
+                                .scaleEffect(1.18)
+                                .opacity(media.isPlaying ? 0.65 : 0.28)
+                                .offset(y: 4)
+
+                            Image(nsImage: artwork)
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
+                                .blur(radius: 9)
+                                .scaleEffect(1.06)
+                                .opacity(media.isPlaying ? 0.85 : 0.38)
+                                .offset(y: 2)
+                        }
+                        .frame(width: 104, height: 58)
+                        .allowsHitTesting(false)
+                        .animation(.easeInOut(duration: 0.35), value: media.isPlaying)
+                    }
+
+                    Group {
+                        if let artwork {
+                            Image(nsImage: artwork)
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
+                        } else {
+                            ZStack {
+                                Color(red: 0.78, green: 0.05, blue: 0.08)
+                                Image(systemName: "play.fill")
+                                    .font(.system(size: 18, weight: .bold))
+                                    .foregroundStyle(.white)
+                            }
                         }
                     }
-                }
-                .frame(width: 104, height: 58)
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .stroke(Color.white.opacity(0.1), lineWidth: 0.7)
+                    .frame(width: 104, height: 58)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(Color.white.opacity(0.12), lineWidth: 0.7)
+                    }
+                    .shadow(color: .black.opacity(artwork != nil ? 0.35 : 0.0), radius: 6, y: 3)
                 }
 
                 VStack(alignment: .leading, spacing: 3) {

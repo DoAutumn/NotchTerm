@@ -246,8 +246,8 @@ struct SettingsView: View {
                     Divider().opacity(0.12).padding(.vertical, 8)
 
                     SettingRow(
-                        title: "Expand on hover",
-                        subtitle: "Open full notch view when mouse hovers over notch"
+                        title: "Enlarge on hover",
+                        subtitle: "Smoothly enlarge compact notch when mouse hovers over it"
                     ) {
                         Toggle("", isOn: $model.settings.expandOnHover)
                             .toggleStyle(.switch)

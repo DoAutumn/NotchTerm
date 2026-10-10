@@ -128,10 +128,13 @@ struct GooeyBridgeShape: Shape {
 enum DynamicNotchSprings {
     /// Harmonious fluid expansion with Apple-grade smooth settle
     static let fluidExpand = Animation.spring(response: 0.36, dampingFraction: 0.86, blendDuration: 0.10)
-    /// Harmonious fluid collapse with silky smooth rhythm
-    static let fluidCollapse = Animation.spring(response: 0.32, dampingFraction: 0.88, blendDuration: 0.08)
+    /// Silky smooth Apple fluid curve collapse (G2 continuous deceleration into bezel, zero bounce)
+    // ponytail: timingCurve(0.16, 1.0, 0.3, 1.0, 0.34s) matches Apple CAMediaTimingFunction; prevents bounce into bezel. Upgrade to velocity-aware spring only if interactive drag-collapse added.
+    static let fluidCollapse = Animation.timingCurve(0.16, 1.0, 0.3, 1.0, duration: 0.34)
     /// Subtle bouncy feedback on interactive touch
     static let rubberBounce = Animation.spring(response: 0.26, dampingFraction: 0.75, blendDuration: 0.06)
+    /// Apple-grade fluid hover spring for silky smooth notch enlargement
+    static let fluidHover = Animation.spring(response: 0.32, dampingFraction: 0.82, blendDuration: 0.08)
     /// Fast responsive transition for content switches
     static let snappy = Animation.spring(response: 0.22, dampingFraction: 0.92, blendDuration: 0.05)
 }

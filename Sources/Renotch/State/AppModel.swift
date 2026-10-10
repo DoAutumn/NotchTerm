@@ -26,6 +26,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var focusTakeoverSite: String = ""
     @Published private(set) var focusTakeoverAppName: String = ""
     @Published private(set) var focusTakeoverTargetApp: NSRunningApplication?
+    @Published private(set) var isHovered = false
 
     /// Delay before the file drop success state collapses back to compact.
     var successDismissalDelay: TimeInterval = 1.2
@@ -158,7 +159,8 @@ final class AppModel: ObservableObject {
                     height: settings.compactHeight
                 )
             }
-            return NSSize(width: settings.compactWidth, height: settings.compactHeight)
+            let hoverHeight: CGFloat = (isHovered && settings.expandOnHover) ? 10 : 0
+            return NSSize(width: settings.compactWidth, height: settings.compactHeight + hoverHeight)
         case .expanded:
             let notchHeightOffset: CGFloat = settings.isHardwareNotchSafeActive ? 26 : 0
             if isShowingCodingSection {
@@ -198,15 +200,12 @@ final class AppModel: ObservableObject {
         collapseWorkItem?.cancel()
         guard !isDraggingFileOver else { return }
         guard mode != .fileDrop, mode != .success, mode != .focusTakeover else { return }
-        guard settings.expandOnHover else { return }
-        if hovering {
-            if mode == .compact {
-                expand(
-                    section: compactDestination,
-                    preferSelectedSection: true
-                )
-            }
-        } else if !isPinned {
+        guard settings.expandOnHover else {
+            isHovered = false
+            return
+        }
+        isHovered = hovering
+        if !hovering && mode == .expanded && !isPinned {
             scheduleCollapse()
         }
     }
