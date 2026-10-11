@@ -1,20 +1,15 @@
 import AppKit
 import Foundation
 
-/// Zero-dependency update check against the GitHub Releases API. Compares the
-/// latest release tag with the running version and offers to open the release
-/// page; the user downloads and installs the new build manually.
 @MainActor
 enum UpdateChecker {
     private static let apiURL = URL(
-        string: "https://api.github.com/repos/yosaiy/renotch/releases/latest"
+        string: "https://api.github.com/repos/DoAutumn/renotch/releases/latest"
     )!
     private static let fallbackPage = URL(
-        string: "https://github.com/yosaiy/renotch/releases/latest"
+        string: "https://github.com/DoAutumn/renotch/releases/latest"
     )!
 
-    /// - Parameter interactive: `true` for the menu action (also reports
-    ///   "up to date" and errors), `false` for the silent launch check.
     static func check(interactive: Bool) {
         Task {
             do {
@@ -51,7 +46,6 @@ enum UpdateChecker {
         }
     }
 
-    /// Component-wise numeric comparison, e.g. 1.10.0 > 1.9.2.
     private static func isNewer(_ candidate: String, than current: String) -> Bool {
         let lhs = candidate.split(separator: ".").compactMap { Int($0) }
         let rhs = current.split(separator: ".").compactMap { Int($0) }

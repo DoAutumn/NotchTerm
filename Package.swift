@@ -8,8 +8,7 @@ let package = Package(
         .macOS(.v13)
     ],
     products: [
-        .executable(name: "Renotch", targets: ["Renotch"]),
-        .executable(name: "RenotchBrowserBridge", targets: ["RenotchBrowserBridge"])
+        .executable(name: "Renotch", targets: ["Renotch"])
     ],
     targets: [
         .executableTarget(
@@ -18,13 +17,6 @@ let package = Package(
             resources: [
                 .copy("Resources/TrayIconTemplate.png")
             ],
-            swiftSettings: [
-                .swiftLanguageMode(.v5)
-            ]
-        ),
-        .executableTarget(
-            name: "RenotchBrowserBridge",
-            path: "BrowserBridge",
             swiftSettings: [
                 .swiftLanguageMode(.v5)
             ]

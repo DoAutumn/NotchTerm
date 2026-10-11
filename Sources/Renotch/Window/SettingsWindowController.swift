@@ -9,13 +9,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             .environmentObject(screenManager)
         let hostingController = NSHostingController(rootView: content)
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 960, height: 640),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 520),
+            styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
 
-        window.minSize = NSSize(width: 760, height: 500)
+        window.minSize = NSSize(width: 460, height: 420)
         window.title = "Re:notch Settings"
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
@@ -23,9 +23,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         window.isReleasedWhenClosed = false
         window.level = .normal
         window.collectionBehavior = [.moveToActiveSpace]
-        window.animationBehavior = .documentWindow
-        window.setFrameAutosaveName("Renotch.SettingsWindow.v3")
-        window.setContentSize(NSSize(width: 960, height: 640))
+        window.setFrameAutosaveName("Renotch.SettingsWindow.v4")
+        window.setContentSize(NSSize(width: 520, height: 520))
         window.center()
 
         super.init(window: window)

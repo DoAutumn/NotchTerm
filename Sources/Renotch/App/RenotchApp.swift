@@ -14,7 +14,6 @@ struct RenotchApp: App {
         }
     }
 
-    /// Custom menu bar icon bundled with the package, scaled to menu bar size.
     private static var trayIcon: NSImage {
         if let url = Bundle.main.url(forResource: "TrayIconTemplate", withExtension: "png"),
            let image = NSImage(contentsOf: url) {
@@ -53,13 +52,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        NotificationService.shared.requestAuthorization()
         UpdateChecker.check(interactive: false)
-        _ = try? BrowserIntegrationInstaller.installBundledHost()
         notchController = NotchWindowController(model: model, screenManager: screenManager)
         settingsController = SettingsWindowController(model: model, screenManager: screenManager)
         if model.settings.isEnabled {
             notchController?.show()
+        }
+        if model.settings.notifyOnComplete {
+            NotificationService.shared.requestAuthorizationIfNeeded()
         }
     }
 
@@ -67,14 +67,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         false
     }
 
+    func setNotchVisible(_ visible: Bool) {
+        model.setVisible(visible)
+        visible ? notchController?.show() : notchController?.hide()
+    }
+
     func showNotch() {
-        model.setVisible(true)
-        notchController?.show()
+        setNotchVisible(true)
     }
 
     func hideNotch() {
-        model.setVisible(false)
-        notchController?.hide()
+        setNotchVisible(false)
     }
 
     func restartNotch() {
@@ -87,27 +90,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func checkForUpdates() {
         UpdateChecker.check(interactive: true)
-    }
-
-    func openBrowserIntegration() {
-        do {
-            try BrowserIntegrationInstaller.installBundledHost()
-            guard let extensionURL = BrowserIntegrationInstaller.bundledExtensionURL,
-                  FileManager.default.fileExists(atPath: extensionURL.path) else {
-                model.showMessage("Browser extension is unavailable")
-                return
-            }
-            NSWorkspace.shared.activateFileViewerSelecting([
-                extensionURL.appendingPathComponent("manifest.json")
-            ])
-            model.setVisible(true)
-            notchController?.show()
-            model.showMessage("Load BrowserExtension in your browser")
-        } catch {
-            model.setVisible(true)
-            notchController?.show()
-            model.showMessage(error.localizedDescription)
-        }
     }
 }
 
@@ -122,62 +104,25 @@ private struct MenuBarContent: View {
 
         Divider()
 
-        Button(activityMenuTitle) {
-            AppDelegate.shared?.showNotch()
-            model.expand(section: .activity, pin: true)
+        if let task = model.selectedTask {
+            Button("\(task.title) · \(task.state.label)") {
+                AppDelegate.shared?.showNotch()
+                model.expand(pin: true)
+            }
+            Button("Jump to iTerm") {
+                model.focusTaskInITerm(task)
+            }
+            Divider()
         }
-
-        Divider()
-
-        TimerMenuSection(timer: model.timer)
 
         Button("Settings…") { AppDelegate.shared?.openSettings() }
             .keyboardShortcut(",")
         Button("Check for Updates…") { AppDelegate.shared?.checkForUpdates() }
-        Button("Set Up Browser Activity…") { AppDelegate.shared?.openBrowserIntegration() }
         Button("Restart Notch") { AppDelegate.shared?.restartNotch() }
 
         Divider()
 
         Button("Quit Re:notch") { NSApp.terminate(nil) }
             .keyboardShortcut("q")
-    }
-
-    private var activityMenuTitle: String {
-        let activity = model.activity.primaryActivity
-        return "\(activity.title) · \(activity.subtitle)"
-    }
-}
-
-private struct TimerMenuSection: View {
-    @EnvironmentObject private var model: AppModel
-    @ObservedObject var timer: TimerService
-
-    var body: some View {
-        if timer.isActive {
-            Button("\(timer.currentMode.title) · \(TimerService.formatted(timer.remaining))") {
-                AppDelegate.shared?.showNotch()
-                model.expand(section: .timer, pin: true)
-            }
-            Button(timer.isPaused ? "Resume \(timer.currentMode.title)" : "Pause \(timer.currentMode.title)") {
-                timer.togglePause()
-            }
-            Button("Skip to \(timer.currentMode == .focus ? "Break" : "Focus")") {
-                timer.skip()
-            }
-            Button("Cancel Timer", role: .destructive) { timer.cancel() }
-            Divider()
-        } else {
-            Button("Start Pomodoro (\(timer.focusMinutes)m Focus + \(timer.breakMinutes)m Break)") {
-                model.startPomodoro()
-            }
-            Button("Start Focus (\(timer.focusMinutes)m)") {
-                model.startTimer(minutes: timer.focusMinutes, mode: .focus)
-            }
-            Button("Start Break (\(timer.breakMinutes)m)") {
-                model.startTimer(minutes: timer.breakMinutes, mode: .breakTime)
-            }
-            Divider()
-        }
     }
 }

@@ -4,71 +4,61 @@
 
 # Re:notch
 
-Turn your Mac's notch into a lightweight, native developer command center.
+Monitor long-running iTerm tasks in your Mac's notch — `git clone`, package builds, and Cursor Agent.
 
 [![macOS 13+](https://img.shields.io/badge/macOS-13%2B-black?logo=apple)](https://developer.apple.com/macos/)
-[![Release](https://img.shields.io/github/v/release/yosaiy/renotch?label=release)](https://github.com/yosaiy/renotch/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE.md)
-
-[**Download Latest**](https://github.com/yosaiy/renotch/releases/latest) • [**Report Bug**](https://github.com/yosaiy/renotch/issues)
 
 </div>
 
 ---
 
-## Features
+## What it does
 
-- **Dev Activity**: Track local servers, ports, Git status, Docker containers, and build jobs.
-
-![Dev Activity](public/Dev-Activity.gif)
-
-- **Media Control**: Apple Music & Spotify playback with album art and controls.
-
-![Media Control](public/Music-Demo.gif)
-
-- **Pomodoro + Website Blocker**: Stop doomscrolling mid-task. Renotch now lets you block specific websites during Pomodoro sessions so you actually get things done.
-
-![Pomodoro + Website Blocker](public/Pomodoro.gif)
-
-- **Browser Bridge**: YouTube playback and Chromium download monitor.
-- **Native & Private**: Swift/SwiftUI, fluid animations, 100% local, zero telemetry.
-
----
+- Watches **iTerm** for long tasks: `git clone|fetch|pull`, `npm/pnpm/yarn/bun` install/build/test, and **Cursor Agent** (`agent` / `cursor-agent`)
+- Shows each task as a notch tab (current + “+N more” menu when there are many)
+- Keeps idle Agent sessions until they exit; animates when Agent finishes outputting
+- Click a task to **jump to and focus** its iTerm session
+- Optional system notifications (default **off**)
 
 ## Install
 
-### Download
-Grab the latest `Re:notch.app` from **[Releases](https://github.com/yosaiy/renotch/releases/latest)** and move it to `/Applications`.
+### Homebrew
 
-### Build from Source
 ```bash
-git clone https://github.com/yosaiy/renotch.git
+brew tap DoAutumn/tap
+brew install --cask renotch
+```
+
+### Build from source
+
+```bash
+git clone https://github.com/DoAutumn/renotch.git
 cd renotch
 swift run Renotch
 ```
 
-To build a standalone `.app` bundle:
+Standalone `.app`:
+
 ```bash
 ./scripts/build-app.sh
 ```
 
----
+Release zip / dmg:
 
-## Browser Extension (Optional)
+```bash
+./scripts/build-zip.sh
+./scripts/build-dmg.sh
+```
 
-Enables YouTube and download tracking:
-1. Open `chrome://extensions` in Chrome/Arc/Brave/Edge.
-2. Enable **Developer mode**.
-3. Click **Load unpacked** and select the `BrowserExtension` directory.
+## Permissions
 
----
+Grant **Automation** access for iTerm (System Settings → Privacy & Security → Automation) so Re:notch can read session state and focus the right tab.
 
 ## Privacy
 
-Re:notch is **100% local**. No accounts, no telemetry, no cloud sync. All data stays on your Mac.
-
----
+100% local. No accounts, no telemetry, no cloud sync.
 
 ## License
 
-MIT © [yosaiy](https://github.com/yosaiy)
+MIT
