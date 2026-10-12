@@ -18,7 +18,7 @@ NotchTerm 用 Cursor Agent CLI 的 hooks 判断 Agent 是 RUNNING 还是 IDLE。
 
 当前注册的事件：
 
-- **→ running：** `beforeSubmitPrompt`、`preToolUse`、`beforeShellExecution`
+- **→ running：** `beforeSubmitPrompt`、`preToolUse`、`beforeShellExecution`、`preCompact`（含 `/summarize` 与自动压缩）
 - **→ idle：** `sessionStart`、`stop`、`afterAgentResponse`
 
 ## 重装 Cursor 之后要做什么

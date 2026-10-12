@@ -12,7 +12,7 @@ Long-running iTerm tasks in your Mac’s notch — git, package builds, and Curs
 
 - Watches **iTerm** for long tasks: `git clone|fetch|pull`, `npm` / `pnpm` / `yarn` / `bun` install·build·test, and **Cursor Agent** (`agent` / `cursor-agent`)
 - Shows active work in the notch (compact strip; hover or click to expand). Multiple tasks → current tab + `+N` menu
-- **Cursor Agent busy/idle** comes only from CLI [hooks](docs/CURSOR-HOOKS.md) (`beforeSubmitPrompt` → RUNNING, `stop` / `afterAgentResponse` → IDLE). No scrollback or transcript guessing
+- **Cursor Agent busy/idle** comes only from CLI [hooks](docs/CURSOR-HOOKS.md) (`beforeSubmitPrompt` / `preCompact` → RUNNING, `stop` / `afterAgentResponse` → IDLE). No scrollback or transcript guessing
 - Idle agents stay out of the notch; when an agent finishes a turn, a short **DONE** banner appears (~4.5s) — click it to jump to that iTerm session
 - Click a running task to **focus its iTerm tab**
 - Menu-bar accessory app; optional Login Items and completion notifications (notifications default **off**)

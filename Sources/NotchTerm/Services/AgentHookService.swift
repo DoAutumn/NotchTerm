@@ -220,6 +220,7 @@ enum AgentHookService {
         hooks["beforeSubmitPrompt"] = upsertNotchTermHook(in: hooks["beforeSubmitPrompt"], command: runningCmd)
         hooks["preToolUse"] = upsertNotchTermHook(in: hooks["preToolUse"], command: runningCmd)
         hooks["beforeShellExecution"] = upsertNotchTermHook(in: hooks["beforeShellExecution"], command: runningCmd)
+        hooks["preCompact"] = upsertNotchTermHook(in: hooks["preCompact"], command: runningCmd)
         hooks["stop"] = upsertNotchTermHook(in: hooks["stop"], command: idleCmd)
         hooks["afterAgentResponse"] = upsertNotchTermHook(in: hooks["afterAgentResponse"], command: idleCmd)
 

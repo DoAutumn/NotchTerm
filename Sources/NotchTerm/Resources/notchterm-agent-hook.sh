@@ -1,6 +1,6 @@
 #!/bin/bash
 # NotchTerm ← Cursor Agent CLI hook (PRIMARY busy/idle signal).
-# beforeSubmitPrompt / preToolUse / beforeShellExecution → running
+# beforeSubmitPrompt / preToolUse / beforeShellExecution / preCompact → running
 # stop / afterAgentResponse / sessionStart → idle
 # Args: <running|idle>
 # stdin: Cursor hook JSON (Cursor may append a heredoc)
