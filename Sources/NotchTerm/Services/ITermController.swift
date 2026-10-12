@@ -18,16 +18,20 @@ enum ITermController {
     /// Uses `/usr/bin/osascript` with a timeout so it never wedges the main actor
     /// the way in-process `NSAppleScript` can.
     nonisolated static func listSessionSummaries() -> [ITermSession] {
+        // Inside `tell application "iTerm"`, bare AppleScript `tab` is shadowed by
+        // iTerm's `tab` class and stringifies to the literal "tab" — not ASCII 9.
+        // Use ASCII character 9 so Swift can split tty / name correctly.
         let script = """
         tell application "iTerm"
           set out to ""
+          set delim to ASCII character 9
           repeat with w in windows
             repeat with t in tabs of w
               repeat with s in sessions of t
                 try
                   set ttyName to tty of s
                   set sessName to name of s
-                  set out to out & "TTY=" & ttyName & tab & "NAME=" & sessName & linefeed
+                  set out to out & "TTY=" & ttyName & delim & "NAME=" & sessName & linefeed
                 end try
               end repeat
             end repeat
@@ -42,11 +46,13 @@ enum ITermController {
             guard text.hasPrefix("TTY=") else { return nil }
             let body = String(text.dropFirst(4))
             let parts = body.split(separator: "\t", maxSplits: 1).map(String.init)
-            guard let tty = parts.first else { return nil }
+            guard let tty = parts.first, !tty.isEmpty else { return nil }
             var name = ""
             if parts.count > 1, parts[1].hasPrefix("NAME=") {
                 name = String(parts[1].dropFirst(5))
             }
+            // Skip rows that failed to split (legacy "…tabNAME=…" garbage).
+            guard parts.count == 2, !name.isEmpty else { return nil }
             return ITermSession(tty: normalizedTTY(tty), name: name)
         }
     }
