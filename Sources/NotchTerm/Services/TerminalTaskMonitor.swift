@@ -708,6 +708,11 @@ enum ShellCommand {
     /// Stdout is drained on a background thread *while* the child runs — waiting
     /// for exit before reading deadlocks once output exceeds the pipe buffer
     /// (~64KB). A full `ps -axo …,command=` listing is often larger than that.
+    ///
+    /// Must not use `readDataToEndOfFile()` / `readDataOfLength:`: closing the
+    /// read end on timeout races the drain thread and raises an uncaught ObjC
+    /// `NSFileHandle` exception → `abort()` (SIGABRT). Prefer the throwing
+    /// `read(upToCount:)` API and keep any bytes already drained.
     static func runData(
         _ executable: String,
         _ arguments: [String],
@@ -726,10 +731,20 @@ enum ShellCommand {
         let group = DispatchGroup()
         group.enter()
         DispatchQueue.global(qos: .utility).async {
-            // Concurrent drain — returns on EOF when the child closes stdout
-            // (or when we close the read end after a hard kill).
-            box.append(stdout.readDataToEndOfFile())
-            group.leave()
+            defer { group.leave() }
+            // Concurrent drain — EOF when the child closes stdout, or an error
+            // when the timeout path closes the read end.
+            var chunks = Data()
+            do {
+                while true {
+                    guard let chunk = try stdout.read(upToCount: 64 * 1024) else { break }
+                    if chunk.isEmpty { break }
+                    chunks.append(chunk)
+                }
+            } catch {
+                // Closed / interrupted pipe after terminate — keep partial output.
+            }
+            box.append(chunks)
         }
 
         do {
@@ -737,7 +752,7 @@ enum ShellCommand {
         } catch {
             try? stdout.close()
             _ = group.wait(timeout: .now() + 0.2)
-            return Data()
+            return box.data
         }
 
         let deadline = Date().addingTimeInterval(timeout)
