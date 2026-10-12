@@ -445,10 +445,10 @@ final class TerminalTaskMonitor: ObservableObject {
 
             var isBusy = true
             var fromHook = false
-            var cwd: URL?
+            // Agents need cwd for hook matching; git/npm need it for the expanded Directory row.
+            let cwd = workingDirectory(pid: process.pid)
 
             if kind == .agent {
-                cwd = workingDirectory(pid: process.pid)
                 let resumeID = resumeID(from: process.command)
 
                 // Agent busy/idle comes only from Cursor hooks.
