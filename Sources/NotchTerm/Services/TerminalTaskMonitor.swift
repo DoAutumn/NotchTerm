@@ -264,7 +264,8 @@ final class TerminalTaskMonitor: ObservableObject {
             )
 
             tracked.command = process.command
-            // Prefer a real iTerm session title over kind fallbacks like "Cursor Agent".
+            // Agents: prefer iTerm session title over "Cursor Agent".
+            // git/npm: titles are always command-based (never iTerm names).
             if process.title != kindFallbackTitle(process.kind, command: process.command)
                 || tracked.title.isEmpty
                 || tracked.title == kindFallbackTitle(tracked.kind, command: tracked.command)
@@ -555,7 +556,7 @@ final class TerminalTaskMonitor: ObservableObject {
         }
 
         let packageMarkers = [
-            "npm run build", "npm run test", "npm install", "npm i ",
+            "npm run build", "npm run test", "npm run deploy", "npm install", "npm i ",
             "pnpm build", "pnpm test", "pnpm install", "pnpm i ",
             "yarn build", "yarn test", "yarn install",
             "bun run build", "bun run test", "bun install", "bun i "
@@ -577,7 +578,8 @@ final class TerminalTaskMonitor: ObservableObject {
         command: String,
         sessionName: String?
     ) -> String {
-        if let sessionName, !sessionName.isEmpty {
+        // Only agents use the iTerm session title; git/npm always show the command.
+        if kind == .agent, let sessionName, !sessionName.isEmpty {
             let cleaned = sessionName
                 .replacingOccurrences(
                     of: #"\s*\(agent\)\s*"#,
@@ -595,6 +597,13 @@ final class TerminalTaskMonitor: ObservableObject {
             if command.lowercased().contains("fetch") { return "git fetch" }
             return "git pull"
         case .npm:
+            let lower = command.lowercased()
+            if lower.contains("npm run deploy") { return "npm run deploy" }
+            if lower.contains("npm run build") { return "npm run build" }
+            if lower.contains("npm run test") { return "npm run test" }
+            if lower.contains("npm install") || lower.range(of: #"\bnpm\s+i\b"#, options: .regularExpression) != nil {
+                return "npm install"
+            }
             let tokens = command.split(separator: " ").suffix(4).joined(separator: " ")
             return tokens.isEmpty ? "Package task" : tokens
         }

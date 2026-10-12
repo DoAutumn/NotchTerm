@@ -48,7 +48,7 @@ struct SettingsView: View {
                 }
 
                 Section("Monitoring") {
-                    Text("Cursor Agent busy/idle comes only from CLI hooks (beforeSubmitPrompt / preCompact → RUNNING, stop → IDLE). No scrollback or transcript guessing. Restart each `agent` session once after installing NotchTerm so it loads ~/.cursor/hooks.json. Also tracks git clone/fetch/pull and npm/pnpm/yarn/bun install|build|test.")
+                    Text("Cursor Agent busy/idle comes only from CLI hooks (beforeSubmitPrompt / preCompact → RUNNING, stop → IDLE). No scrollback or transcript guessing. Restart each `agent` session once after installing NotchTerm so it loads ~/.cursor/hooks.json. Also tracks git clone/fetch/pull and npm/pnpm/yarn/bun install|build|test (plus npm run deploy).")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
