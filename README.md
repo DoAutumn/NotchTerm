@@ -1,63 +1,66 @@
-<div align="center">
+# NotchTerm
 
-<img src="public/renotch_logo.png" alt="Re:notch" width="120">
-
-# Re:notch
-
-Monitor long-running iTerm tasks in your Mac's notch — `git clone`, package builds, and Cursor Agent.
+Long-running iTerm tasks in your Mac’s notch — git, package builds, and Cursor Agent.
 
 [![macOS 13+](https://img.shields.io/badge/macOS-13%2B-black?logo=apple)](https://developer.apple.com/macos/)
+[![Apple Silicon](https://img.shields.io/badge/CPU-Apple%20Silicon-black?logo=apple)](https://support.apple.com/en-us/HT211814)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE.md)
-
-</div>
 
 ---
 
 ## What it does
 
-- Watches **iTerm** for long tasks: `git clone|fetch|pull`, `npm/pnpm/yarn/bun` install/build/test, and **Cursor Agent** (`agent` / `cursor-agent`)
-- Shows each task as a notch tab (current + “+N more” menu when there are many)
-- Keeps idle Agent sessions until they exit; animates when Agent finishes outputting
-- Click a task to **jump to and focus** its iTerm session
-- Optional system notifications (default **off**)
+- Watches **iTerm** for long tasks: `git clone|fetch|pull`, `npm` / `pnpm` / `yarn` / `bun` install·build·test, and **Cursor Agent** (`agent` / `cursor-agent`)
+- Shows active work in the notch (compact strip; hover or click to expand). Multiple tasks → current tab + `+N` menu
+- **Cursor Agent busy/idle** comes only from CLI [hooks](docs/CURSOR-HOOKS.md) (`beforeSubmitPrompt` → RUNNING, `stop` / `afterAgentResponse` → IDLE). No scrollback or transcript guessing
+- Idle agents stay out of the notch; when an agent finishes a turn, a short **DONE** banner appears (~4.5s) — click it to jump to that iTerm session
+- Click a running task to **focus its iTerm tab**
+- Menu-bar accessory app; optional Login Items and completion notifications (notifications default **off**)
 
-## Install
+## Requirements
 
-### Homebrew
+- macOS 13+
+- **Apple Silicon** (arm64). The release `.app` is arm64-only
+- [iTerm2](https://iterm2.com/)
+- Cursor Agent CLI for agent busy/idle (hooks install on first NotchTerm launch)
+
+## Build & run
 
 ```bash
-brew tap DoAutumn/tap
-brew install --cask renotch
+swift run NotchTerm
 ```
 
-### Build from source
-
-```bash
-git clone https://github.com/DoAutumn/renotch.git
-cd renotch
-swift run Renotch
-```
-
-Standalone `.app`:
+Standalone `.app` (arm64):
 
 ```bash
 ./scripts/build-app.sh
+open dist/NotchTerm.app
 ```
 
-Release zip / dmg:
+DMG / zip (optional):
 
 ```bash
-./scripts/build-zip.sh
 ./scripts/build-dmg.sh
+./scripts/build-zip.sh
 ```
+
+## Cursor Agent hooks
+
+On launch, NotchTerm merges its hooks into `~/.cursor/hooks.json` and installs `~/.cursor/hooks/notchterm-agent-hook.sh`.
+
+After installing or updating NotchTerm (or reinstalling Cursor), **open NotchTerm once**, then **restart each `agent` session** so the CLI reloads hooks.
+
+Details and troubleshooting: [docs/CURSOR-HOOKS.md](docs/CURSOR-HOOKS.md).
 
 ## Permissions
 
-Grant **Automation** access for iTerm (System Settings → Privacy & Security → Automation) so Re:notch can read session state and focus the right tab.
+Grant **Automation** access for iTerm (System Settings → Privacy & Security → Automation) so NotchTerm can list sessions and focus the right tab.
+
+Ad-hoc signed local builds may need to re-grant Automation after each rebuild; a stable local signing identity keeps the grant.
 
 ## Privacy
 
-100% local. No accounts, no telemetry, no cloud sync.
+100% local. No accounts, no telemetry, no cloud sync. Agent state files live under `~/Library/Application Support/com.doautumn.notchterm/`.
 
 ## License
 

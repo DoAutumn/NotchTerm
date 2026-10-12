@@ -1,6 +1,8 @@
 .build/
 .swiftpm/
 dist/
+AppIcon.iconset/
+AppIcon-1024.png
 .firecrawl/
 graphify-out/
 .DS_Store

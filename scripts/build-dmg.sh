@@ -4,18 +4,18 @@ set -euo pipefail
 SCRIPT_DIR="${0:A:h}"
 PROJECT_DIR="${SCRIPT_DIR:h}"
 DIST_DIR="$PROJECT_DIR/dist"
-APP_NAME="Re:notch.app"
+APP_NAME="NotchTerm.app"
 APP_PATH="$DIST_DIR/$APP_NAME"
-VOLUME_NAME="Re-notch"
-VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PROJECT_DIR/Resources/Info.plist" 2>/dev/null || echo "1.2.0")"
-DMG_PATH="$DIST_DIR/Re-notch-${VERSION}.dmg"
-DMG_TEMP="$DIST_DIR/temp_renotch.dmg"
+VOLUME_NAME="NotchTerm"
+VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PROJECT_DIR/Resources/Info.plist" 2>/dev/null || echo "2.0.0")"
+DMG_PATH="$DIST_DIR/NotchTerm-${VERSION}.dmg"
+DMG_TEMP="$DIST_DIR/temp_notchterm.dmg"
 STAGING_DIR="$DIST_DIR/dmg_staging"
 
 # 1. Build the app bundle first
 "$SCRIPT_DIR/build-app.sh"
 
-echo "Creating Drag-to-Install DMG for Re:notch ${VERSION}..."
+echo "Creating Drag-to-Install DMG for NotchTerm ${VERSION}..."
 
 # 2. Prepare clean staging directory
 rm -rf "$STAGING_DIR" "$DMG_TEMP" "$DMG_PATH"

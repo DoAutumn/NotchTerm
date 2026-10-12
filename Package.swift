@@ -3,19 +3,22 @@
 import PackageDescription
 
 let package = Package(
-    name: "Renotch",
+    name: "NotchTerm",
     platforms: [
         .macOS(.v13)
     ],
     products: [
-        .executable(name: "Renotch", targets: ["Renotch"])
+        .executable(name: "NotchTerm", targets: ["NotchTerm"])
     ],
     targets: [
         .executableTarget(
-            name: "Renotch",
-            path: "Sources/Renotch",
+            name: "NotchTerm",
+            path: "Sources/NotchTerm",
             resources: [
-                .copy("Resources/TrayIconTemplate.png")
+                .copy("Resources/TrayIconTemplate.png"),
+                .copy("Resources/TrayIconTemplate@2x.png"),
+                .copy("Resources/TrayIconTemplate@3x.png"),
+                .copy("Resources/notchterm-agent-hook.sh")
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v5)
