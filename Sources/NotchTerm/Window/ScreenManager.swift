@@ -55,3 +55,16 @@ final class ScreenManager: ObservableObject {
         return number.uint32Value
     }
 }
+
+extension NSScreen {
+    /// Black hardware notch in points, centered on the top edge. Nil on displays without one.
+    var hardwareNotchSize: CGSize? {
+        guard safeAreaInsets.top > 0,
+              let left = auxiliaryTopLeftArea,
+              let right = auxiliaryTopRightArea else { return nil }
+        let width = frame.width - left.width - right.width
+        let height = max(safeAreaInsets.top, left.height, right.height)
+        guard width > 40, height > 8 else { return nil }
+        return CGSize(width: width, height: height)
+    }
+}

@@ -116,6 +116,7 @@ final class NotchWindowController: NSWindowController {
         if panel.frame != frame {
             panel.setFrame(frame, display: true)
         }
+        model.updateHardwareNotchSize(screen.hardwareNotchSize)
         updateClickThrough()
     }
 

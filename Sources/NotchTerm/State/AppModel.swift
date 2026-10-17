@@ -37,6 +37,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var selectedTaskID: String?
     /// Drives the drop-in / tuck-away surface animation (window may stay up briefly).
     @Published private(set) var isSurfaceRevealed = false
+    /// Physical notch on the target display, in points. Nil when that display has no notch.
+    @Published private(set) var hardwareNotchSize: CGSize?
     @Published var statusMessage: String?
 
     let monitor = TerminalTaskMonitor()
@@ -102,6 +104,11 @@ final class AppModel: ObservableObject {
         applyLaunchAtLoginIfNeeded(oldValue: !settings.launchAtLogin)
     }
 
+    func updateHardwareNotchSize(_ size: CGSize?) {
+        guard hardwareNotchSize != size else { return }
+        hardwareNotchSize = size
+    }
+
     func setVisible(_ visible: Bool) {
         settings.isEnabled = visible
         syncNotchPresentation()
@@ -122,7 +129,7 @@ final class AppModel: ObservableObject {
             concealWorkItem?.cancel()
             concealWorkItem = nil
             onVisibilityChanged?(true)
-            withAnimation(NotchMotion.reveal) {
+            withAnimation(revealAnimation) {
                 isSurfaceRevealed = true
             }
             return
@@ -139,12 +146,12 @@ final class AppModel: ObservableObject {
             isSurfaceRevealed = false
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.lastPresentedNotch else { return }
-                withAnimation(NotchMotion.reveal) {
+                withAnimation(self.revealAnimation) {
                     self.isSurfaceRevealed = true
                 }
             }
         } else {
-            withAnimation(NotchMotion.conceal) {
+            withAnimation(concealAnimation) {
                 isSurfaceRevealed = false
             }
             concealWorkItem?.cancel()
@@ -153,8 +160,20 @@ final class AppModel: ObservableObject {
                 self.onVisibilityChanged?(false)
             }
             concealWorkItem = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.34, execute: work)
+            DispatchQueue.main.asyncAfter(deadline: .now() + concealHold, execute: work)
         }
+    }
+
+    private var revealAnimation: Animation {
+        hardwareNotchSize == nil ? NotchMotion.reveal : NotchMotion.notchReveal
+    }
+
+    private var concealAnimation: Animation {
+        hardwareNotchSize == nil ? NotchMotion.conceal : NotchMotion.notchConceal
+    }
+
+    private var concealHold: TimeInterval {
+        hardwareNotchSize == nil ? NotchMotion.concealHold : NotchMotion.notchConcealHold
     }
 
     func hoverChanged(_ hovering: Bool) {
