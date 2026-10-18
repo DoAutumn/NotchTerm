@@ -11,6 +11,13 @@ struct CompactTaskView: View {
 private struct CompactBody: View {
     @ObservedObject var model: AppModel
     @ObservedObject var monitor: TerminalTaskMonitor
+    @ObservedObject private var nowPlaying: NowPlayingMonitor
+
+    init(model: AppModel, monitor: TerminalTaskMonitor) {
+        self.model = model
+        self.monitor = monitor
+        _nowPlaying = ObservedObject(wrappedValue: model.nowPlaying)
+    }
 
     /// Prefer the newest running task in the compact strip.
     private var displayTask: TerminalTask? {
@@ -70,8 +77,19 @@ private struct CompactBody: View {
                 } else {
                     StateChip(state: task.state, compact: true)
                 }
+            } else if nowPlaying.showsInNotch {
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(SoundWaveView.color)
+                        .frame(width: 5, height: 5)
+                    Text(nowPlaying.title)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 4)
+                SoundWaveView()
             } else {
-                // No active work — panel is hidden by AppModel; keep layout empty.
                 Color.clear
             }
         }
@@ -142,6 +160,45 @@ struct TaskGlyph: View {
         case .npm: return Color(red: 0.35, green: 0.75, blue: 0.55)
         case .agent: return Color(red: 0.55, green: 0.72, blue: 1.0)
         }
+    }
+}
+
+struct SoundWaveView: View {
+    static let color = Color(red: 0.45, green: 0.85, blue: 0.62)
+    private let barCount = 4
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
+            let time = context.date.timeIntervalSinceReferenceDate
+            HStack(alignment: .center, spacing: 2) {
+                ForEach(0..<barCount, id: \.self) { index in
+                    Capsule()
+                        .fill(Self.color)
+                        .frame(width: 2.5, height: height(index: index, time: time))
+                }
+            }
+            .frame(width: 16, height: 14, alignment: .center)
+        }
+    }
+
+    /// Irregular equalizer: each bar eases between fresh heights instead of looping two sizes.
+    private func height(index: Int, time: Double) -> CGFloat {
+        let slot = time / 0.28
+        let step = floor(slot)
+        let fraction = slot - step
+        let eased = fraction * fraction * (3 - 2 * fraction)
+        let from = level(index: index, step: step)
+        let to = level(index: index, step: step + 1)
+        return from + (to - from) * eased
+    }
+
+    private func level(index: Int, step: Double) -> CGFloat {
+        var mix = UInt64(index &* 97) &+ UInt64(step) &* 0x9E37_79B9_7F4A_7C15
+        mix ^= mix >> 30
+        mix &*= 0xBF58_476D_1CE4_E5B9
+        mix ^= mix >> 27
+        let unit = CGFloat(mix % 10_000) / 10_000
+        return 3.5 + unit * 10.5
     }
 }
 

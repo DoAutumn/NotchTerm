@@ -42,6 +42,7 @@ final class AppModel: ObservableObject {
     @Published var statusMessage: String?
 
     let monitor = TerminalTaskMonitor()
+    let nowPlaying = NowPlayingMonitor()
 
     var onPanelConfigurationChanged: (() -> Void)?
     /// Fired when the notch should appear/disappear (enabled ∧ has active content).
@@ -56,10 +57,16 @@ final class AppModel: ObservableObject {
     private var userPinnedSelection = false
     private var isApplyingSettings = false
     private var lastPresentedNotch = false
+    private var nowPlayingCancellable: AnyCancellable?
 
-    /// Compact strip content: running tasks, or the brief DONE banner.
-    var hasNotchContent: Bool {
+    /// Tasks and the brief DONE banner. Music never outranks these.
+    var hasTaskContent: Bool {
         !monitor.tasks.isEmpty || monitor.lastCompletion != nil
+    }
+
+    /// Compact strip content: tasks first, otherwise MusicPlayer while a song is playing.
+    var hasNotchContent: Bool {
+        hasTaskContent || nowPlaying.showsInNotch
     }
 
     var currentSize: CGSize {
@@ -100,7 +107,15 @@ final class AppModel: ObservableObject {
                 self.adjustMonitorCadence()
             }
         }
+        nowPlayingCancellable = nowPlaying.objectWillChange.sink { [weak self] _ in
+            guard let self else { return }
+            self.objectWillChange.send()
+            Task { @MainActor in
+                self.syncNotchPresentation()
+            }
+        }
         monitor.start(interval: settings.pollIntervalSeconds)
+        nowPlaying.start()
         applyLaunchAtLoginIfNeeded(oldValue: !settings.launchAtLogin)
     }
 
@@ -117,7 +132,7 @@ final class AppModel: ObservableObject {
     /// Show notch only while there is something to display; otherwise tuck away.
     func syncNotchPresentation() {
         let present = settings.isEnabled && hasNotchContent
-        if !hasNotchContent, mode == .expanded || isPinned {
+        if !hasTaskContent, mode == .expanded || isPinned {
             collapse(force: true)
         }
         // Wait until the window controller has wired the callback (avoids
@@ -179,6 +194,8 @@ final class AppModel: ObservableObject {
     func hoverChanged(_ hovering: Bool) {
         guard isHovering != hovering else { return }
         isHovering = hovering
+        // Music-only strip stays compact; the expanded panel is for terminal tasks.
+        guard hasTaskContent else { return }
         // Animate only the in-window notch — never resize the NSPanel here.
         if hovering {
             cancelCollapse()
@@ -194,6 +211,7 @@ final class AppModel: ObservableObject {
     }
 
     func notchClicked() {
+        guard hasTaskContent else { return }
         withAnimation(NotchMotion.spring) {
             if mode == .expanded, isPinned {
                 isPinned = false
