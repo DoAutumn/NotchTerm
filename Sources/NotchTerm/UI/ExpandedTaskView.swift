@@ -43,7 +43,7 @@ private struct ExpandedBody: View {
 
     private var header: some View {
         HStack(spacing: 0) {
-            Text("Terminal Tasks")
+            Text("终端任务")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.white)
             Spacer(minLength: 8)
@@ -89,13 +89,13 @@ private struct ExpandedBody: View {
                 }
 
                 if let dir = task.workingDirectory?.path {
-                    labeledRow("Directory", value: dir)
+                    labeledRow("目录", value: dir)
                 }
 
                 Button {
                     model.focusTaskInITerm(task)
                 } label: {
-                    Label("Jump to iTerm", systemImage: "arrow.up.forward.app")
+                    Label("跳转到 iTerm", systemImage: "arrow.up.forward.app")
                         .font(.system(size: 11, weight: .semibold))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 9)

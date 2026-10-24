@@ -8,7 +8,7 @@ enum TerminalTaskKind: String, Codable, Sendable, CaseIterable {
     var title: String {
         switch self {
         case .git: return "Git"
-        case .npm: return "Package"
+        case .npm: return "包管理"
         case .agent: return "Agent"
         }
     }
@@ -29,9 +29,9 @@ enum TerminalTaskState: String, Codable, Sendable {
 
     var label: String {
         switch self {
-        case .running: return "Running"
-        case .idle: return "Idle"
-        case .completed: return "Done"
+        case .running: return "运行中"
+        case .idle: return "空闲"
+        case .completed: return "完成"
         }
     }
 }

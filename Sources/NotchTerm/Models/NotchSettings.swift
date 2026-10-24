@@ -20,6 +20,11 @@ struct NotchSettings: Codable, Equatable, Sendable {
     var verticalOffset = 0.0
     var pollIntervalSeconds = 1.2
 
+    /// 股票监视总开关；关闭后不拉行情、不改菜单栏标题、不提醒。
+    var stockWatcherEnabled = false
+    var stockRefreshIntervalSeconds = StockRefreshSettings.defaultInterval
+    var stockCarouselIntervalSeconds = StockCarouselSettings.defaultInterval
+
     static let `default` = NotchSettings()
 
     mutating func clampValues() {
@@ -30,6 +35,12 @@ struct NotchSettings: Codable, Equatable, Sendable {
         collapseDelay = collapseDelay.clamped(to: 0.12...1.2)
         verticalOffset = verticalOffset.clamped(to: 0...40)
         pollIntervalSeconds = pollIntervalSeconds.clamped(to: 0.6...3.0)
+        if !StockRefreshSettings.options.contains(stockRefreshIntervalSeconds) {
+            stockRefreshIntervalSeconds = StockRefreshSettings.defaultInterval
+        }
+        if !StockCarouselSettings.options.contains(stockCarouselIntervalSeconds) {
+            stockCarouselIntervalSeconds = StockCarouselSettings.defaultInterval
+        }
     }
 }
 

@@ -12,11 +12,13 @@ private struct CompactBody: View {
     @ObservedObject var model: AppModel
     @ObservedObject var monitor: TerminalTaskMonitor
     @ObservedObject private var nowPlaying: NowPlayingMonitor
+    @ObservedObject private var stockWatcher: StockWatcherService
 
     init(model: AppModel, monitor: TerminalTaskMonitor) {
         self.model = model
         self.monitor = monitor
         _nowPlaying = ObservedObject(wrappedValue: model.nowPlaying)
+        _stockWatcher = ObservedObject(wrappedValue: model.stockWatcher)
     }
 
     /// Prefer the newest running task in the compact strip.
@@ -31,14 +33,38 @@ private struct CompactBody: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            if let completion = monitor.lastCompletion {
+            if stockWatcher.hasPendingAlert {
+                Button {
+                    model.confirmStockAlerts()
+                } label: {
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(StockTheme.up)
+                            .frame(width: 5, height: 5)
+                        Text(stockWatcher.alertSummary)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                        Spacer(minLength: 4)
+                        Text("确认")
+                            .font(.system(size: 10, weight: .bold, design: .rounded))
+                            .foregroundStyle(.black)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(Capsule().fill(Color.white.opacity(0.92)))
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("确认并收起提醒")
+            } else if let completion = monitor.lastCompletion {
                 Button {
                     model.focusCompletionInITerm(completion)
                 } label: {
                     HStack(spacing: 6) {
                         titleChip(title: completion.title, dot: .green)
                         Spacer(minLength: 4)
-                        Text("DONE")
+                        Text("完成")
                             .font(.system(size: 8, weight: .bold, design: .rounded))
                             .foregroundStyle(Color.green.opacity(0.9))
                         CompletionBadge()
@@ -46,7 +72,7 @@ private struct CompactBody: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .help("Jump to iTerm")
+                .help("跳转到 iTerm")
             } else if let task = displayTask {
                 titleChip(title: task.title, dot: dotColor(for: task.state))
 
@@ -238,9 +264,9 @@ struct StateChip: View {
 
     private var shortLabel: String {
         switch state {
-        case .running: return "RUN"
-        case .idle: return "IDLE"
-        case .completed: return "DONE"
+        case .running: return "运行"
+        case .idle: return "空闲"
+        case .completed: return "完成"
         }
     }
 

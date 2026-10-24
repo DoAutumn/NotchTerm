@@ -24,6 +24,13 @@ final class AppModel: ObservableObject {
             store.save(settings)
             onPanelConfigurationChanged?()
             adjustMonitorCadence()
+            let stockChanged =
+                oldValue.stockWatcherEnabled != settings.stockWatcherEnabled
+                || oldValue.stockRefreshIntervalSeconds != settings.stockRefreshIntervalSeconds
+                || oldValue.stockCarouselIntervalSeconds != settings.stockCarouselIntervalSeconds
+            if stockChanged {
+                applyStockWatcherSettings()
+            }
             applyLaunchAtLoginIfNeeded(oldValue: oldValue.launchAtLogin)
             if oldValue.notifyOnComplete != settings.notifyOnComplete, settings.notifyOnComplete {
                 NotificationService.shared.requestAuthorizationIfNeeded()
@@ -43,6 +50,7 @@ final class AppModel: ObservableObject {
 
     let monitor = TerminalTaskMonitor()
     let nowPlaying = NowPlayingMonitor()
+    let stockWatcher = StockWatcherService()
 
     var onPanelConfigurationChanged: (() -> Void)?
     /// Fired when the notch should appear/disappear (enabled ∧ has active content).
@@ -54,28 +62,43 @@ final class AppModel: ObservableObject {
     private var concealWorkItem: DispatchWorkItem?
     private var lastNotifiedCompletionID: UUID?
     private var monitorCancellable: AnyCancellable?
+    private var nowPlayingCancellable: AnyCancellable?
+    private var stockCancellable: AnyCancellable?
     private var userPinnedSelection = false
     private var isApplyingSettings = false
     private var lastPresentedNotch = false
-    private var nowPlayingCancellable: AnyCancellable?
+    /// 避免行情 tick 在尺寸未变时反复 setFrame。
+    private var lastPanelConfigSize: CGSize = .zero
+
+    /// 股票提醒优先于任务 / DONE。
+    var hasStockAlert: Bool { stockWatcher.hasPendingAlert }
 
     /// Tasks and the brief DONE banner. Music never outranks these.
     var hasTaskContent: Bool {
         !monitor.tasks.isEmpty || monitor.lastCompletion != nil
     }
 
-    /// Compact strip content: tasks first, otherwise MusicPlayer while a song is playing.
+    /// Compact strip: stock alert > tasks/DONE > music.
     var hasNotchContent: Bool {
-        hasTaskContent || nowPlaying.showsInNotch
+        hasStockAlert || hasTaskContent || nowPlaying.showsInNotch
     }
 
     var currentSize: CGSize {
         switch mode {
         case .compact:
-            return CGSize(width: settings.compactWidth, height: settings.compactHeight)
+            return CGSize(width: compactWidthForContent, height: settings.compactHeight)
         case .expanded:
             return CGSize(width: settings.expandedWidth, height: settings.expandedHeight)
         }
+    }
+
+    /// 多只股票提醒拼一行时可加宽刘海；短文案也不小于用户配置的 compactWidth。
+    private var compactWidthForContent: CGFloat {
+        guard hasStockAlert else { return settings.compactWidth }
+        let summary = stockWatcher.alertSummary
+        let estimated = 120.0 + Double(summary.count) * 7.5
+        let needed = CGFloat(estimated.clamped(to: NotchSettings.compactWidthRange))
+        return max(settings.compactWidth, needed)
     }
 
     var selectedTask: TerminalTask? {
@@ -114,8 +137,17 @@ final class AppModel: ObservableObject {
                 self.syncNotchPresentation()
             }
         }
+        stockCancellable = stockWatcher.objectWillChange.sink { [weak self] _ in
+            guard let self else { return }
+            self.objectWillChange.send()
+            Task { @MainActor in
+                // 只走 sync：尺寸真变了才 notify panel（提醒加宽）；勿每 tick 双刷 setFrame。
+                self.syncNotchPresentation()
+            }
+        }
         monitor.start(interval: settings.pollIntervalSeconds)
         nowPlaying.start()
+        applyStockWatcherSettings()
         applyLaunchAtLoginIfNeeded(oldValue: !settings.launchAtLogin)
     }
 
@@ -132,8 +164,11 @@ final class AppModel: ObservableObject {
     /// Show notch only while there is something to display; otherwise tuck away.
     func syncNotchPresentation() {
         let present = settings.isEnabled && hasNotchContent
-        if !hasTaskContent, mode == .expanded || isPinned {
-            collapse(force: true)
+        // 股票提醒优先：有提醒时强制收起展开面板；无任务时也不保持展开。
+        if hasStockAlert || !hasTaskContent {
+            if mode == .expanded || isPinned {
+                collapse(force: true)
+            }
         }
         // Wait until the window controller has wired the callback (avoids
         // swallowing the first "show" during AppModel.init).
@@ -150,12 +185,17 @@ final class AppModel: ObservableObject {
             return
         }
 
-        guard present != lastPresentedNotch else { return }
+        guard present != lastPresentedNotch else {
+            // 提醒文案变长时仍要刷新面板宽度；尺寸不变则跳过。
+            if present { notifyPanelConfigurationIfSizeChanged() }
+            return
+        }
         lastPresentedNotch = present
 
         if present {
             concealWorkItem?.cancel()
             concealWorkItem = nil
+            lastPanelConfigSize = currentSize
             // Mount the panel first (hidden surface), then drop it in next frame.
             onVisibilityChanged?(true)
             isSurfaceRevealed = false
@@ -194,9 +234,8 @@ final class AppModel: ObservableObject {
     func hoverChanged(_ hovering: Bool) {
         guard isHovering != hovering else { return }
         isHovering = hovering
-        // Music-only strip stays compact; the expanded panel is for terminal tasks.
-        guard hasTaskContent else { return }
-        // Animate only the in-window notch — never resize the NSPanel here.
+        // 股票提醒 / 音乐仅 compact；展开面板只给终端任务。
+        guard hasTaskContent, !hasStockAlert else { return }
         if hovering {
             cancelCollapse()
             if mode == .compact {
@@ -211,6 +250,13 @@ final class AppModel: ObservableObject {
     }
 
     func notchClicked() {
+        if hasStockAlert {
+            stockWatcher.confirmAlerts()
+            syncNotchPresentation()
+            // 确认时鼠标可能仍在刘海上，isHovering 已是 true，需补一次展开判定。
+            reapplyHoverExpandIfNeeded()
+            return
+        }
         guard hasTaskContent else { return }
         withAnimation(NotchMotion.spring) {
             if mode == .expanded, isPinned {
@@ -224,7 +270,25 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func confirmStockAlerts() {
+        stockWatcher.confirmAlerts()
+        syncNotchPresentation()
+        reapplyHoverExpandIfNeeded()
+    }
+
+    /// 提醒期间 hoverChanged(true) 会 early-return；确认后若指针仍在上面，补跑悬停展开。
+    private func reapplyHoverExpandIfNeeded() {
+        guard isHovering, hasTaskContent, !hasStockAlert else { return }
+        cancelCollapse()
+        guard mode == .compact else { return }
+        withAnimation(NotchMotion.spring) {
+            isPinned = false
+            mode = .expanded
+        }
+    }
+
     func expand(pin: Bool = false) {
+        guard hasTaskContent, !hasStockAlert else { return }
         cancelCollapse()
         withAnimation(NotchMotion.spring) {
             isPinned = pin || isPinned
@@ -253,7 +317,7 @@ final class AppModel: ObservableObject {
 
     func focusSelectedTaskInITerm() {
         guard let task = selectedTask else {
-            showMessage("No active task")
+            showMessage("当前没有任务")
             return
         }
         focusTaskInITerm(task)
@@ -272,7 +336,7 @@ final class AppModel: ObservableObject {
 
     private func focusTTYInITerm(_ tty: String?) {
         guard let tty else {
-            showMessage("No iTerm TTY for this task")
+            showMessage("该任务没有可用的 iTerm TTY")
             return
         }
         // ShellCommand blocks; never run it on the main actor.
@@ -283,9 +347,9 @@ final class AppModel: ObservableObject {
             await MainActor.run {
                 guard let self else { return }
                 if ok {
-                    self.showMessage("Focused iTerm")
+                    self.showMessage("已切换到 iTerm")
                 } else {
-                    self.showMessage("Could not focus iTerm (check Automation permission)")
+                    self.showMessage("无法聚焦 iTerm（请检查自动化权限）")
                     if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation") {
                         NSWorkspace.shared.open(url)
                     }
@@ -304,6 +368,21 @@ final class AppModel: ObservableObject {
 
     func resetSettings() {
         settings = .default
+    }
+
+    private func applyStockWatcherSettings() {
+        stockWatcher.applySettings(
+            enabled: settings.stockWatcherEnabled,
+            refreshInterval: settings.stockRefreshIntervalSeconds,
+            carouselInterval: settings.stockCarouselIntervalSeconds
+        )
+    }
+
+    private func notifyPanelConfigurationIfSizeChanged() {
+        let size = currentSize
+        guard size != lastPanelConfigSize else { return }
+        lastPanelConfigSize = size
+        onPanelConfigurationChanged?()
     }
 
     /// Idle: keep a short poll as a safety net; hook-dir watcher handles instant wake.
@@ -341,7 +420,7 @@ final class AppModel: ObservableObject {
 
         if settings.notifyOnComplete {
             NotificationService.shared.taskCompleted(
-                title: "\(event.kind.title) finished",
+                title: "\(event.kind.title) 已完成",
                 body: "\(event.title) — \(event.subtitle)"
             )
         }
@@ -380,7 +459,7 @@ final class AppModel: ObservableObject {
                 settings = next
                 store.save(settings)
             }
-            showMessage("Could not update Login Items")
+            showMessage("无法更新登录项")
         }
     }
 }

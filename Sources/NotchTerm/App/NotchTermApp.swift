@@ -6,16 +6,15 @@ struct NotchTermApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        MenuBarExtra {
-            MenuBarContent()
-                .environmentObject(appDelegate.model)
-        } label: {
-            Image(nsImage: Self.trayIcon)
+        // 菜单栏 UI 由 AppDelegate 的 NSStatusItem + NSPanel 驱动；
+        // Settings 场景仅满足 SwiftUI App 需要至少一个 Scene。
+        Settings {
+            EmptyView()
         }
     }
 
     /// Multi-representation template icon so Retina menu bars stay sharp.
-    private static let trayIcon: NSImage = {
+    static let trayIconImage: NSImage = {
         let pointSize = NSSize(width: 18, height: 18)
         let image = NSImage(size: pointSize)
 
@@ -30,7 +29,6 @@ struct NotchTermApp: App {
             guard let url = resolveTrayURL(named: name),
                   let data = try? Data(contentsOf: url),
                   let rep = NSBitmapImageRep(data: data) else { continue }
-            // Point size stays 18×18; pixel dimensions encode the scale.
             rep.size = pointSize
             image.addRepresentation(rep)
             loadedAny = true
@@ -69,6 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let screenManager = ScreenManager()
     private var notchController: NotchWindowController?
     private var settingsController: SettingsWindowController?
+    private var menuBarController: MenuBarController?
 
     override init() {
         super.init()
@@ -77,11 +76,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        // Install Cursor CLI hooks so agents push running/idle (hooks are the only agent-state signal).
         _ = AgentHookService.ensureInstalled()
-        UpdateChecker.check(interactive: false)
         notchController = NotchWindowController(model: model, screenManager: screenManager)
         settingsController = SettingsWindowController(model: model, screenManager: screenManager)
+        menuBarController = MenuBarController(model: model)
         model.syncNotchPresentation()
         if model.settings.notifyOnComplete {
             NotificationService.shared.requestAuthorizationIfNeeded()
@@ -105,41 +103,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setNotchVisible(false)
     }
 
-    func restartNotch() {
-        notchController?.restart()
-    }
-
     func openSettings() {
+        menuBarController?.dismissPanel()
         settingsController?.present()
     }
 
-    func checkForUpdates() {
-        UpdateChecker.check(interactive: true)
+    func settingsWindowDidClose() {
+        NSApp.setActivationPolicy(.accessory)
     }
-}
 
-private struct MenuBarContent: View {
-    @EnvironmentObject private var model: AppModel
-
-    var body: some View {
-        if let task = model.selectedTask {
-            Button("\(task.title) · \(task.state.label)") {
-                model.expand(pin: true)
-            }
-            Button("Jump to iTerm") {
-                model.focusTaskInITerm(task)
-            }
-            Divider()
-        }
-
-        Button("Settings…") { AppDelegate.shared?.openSettings() }
-            .keyboardShortcut(",")
-        Button("Check for Updates…") { AppDelegate.shared?.checkForUpdates() }
-        Button("Restart Notch") { AppDelegate.shared?.restartNotch() }
-
-        Divider()
-
-        Button("Quit NotchTerm") { NSApp.terminate(nil) }
-            .keyboardShortcut("q")
+    /// 菜单栏菜单开合时暂停刘海鼠标采样，避免 accessory 下拖慢菜单悬停。
+    func setMenuBarMenuOpen(_ open: Bool) {
+        notchController?.setMenuTrackingActive(open)
     }
 }
