@@ -23,7 +23,6 @@ final class AppModel: ObservableObject {
 
             store.save(settings)
             onPanelConfigurationChanged?()
-            adjustMonitorCadence()
             let stockChanged =
                 oldValue.stockWatcherEnabled != settings.stockWatcherEnabled
                 || oldValue.stockRefreshIntervalSeconds != settings.stockRefreshIntervalSeconds
@@ -116,8 +115,9 @@ final class AppModel: ObservableObject {
 
     init() {
         var loaded = store.load()
-        if loaded.expandedHeight != 220 {
-            loaded.expandedHeight = 220
+        // Migrate older defaults to the current expanded layout height.
+        if [220.0, 168.0, 184.0].contains(loaded.expandedHeight) {
+            loaded.expandedHeight = 176
             store.save(loaded)
         }
         settings = loaded
@@ -127,7 +127,6 @@ final class AppModel: ObservableObject {
             Task { @MainActor in
                 self.handleCompletionSideEffects()
                 self.syncNotchPresentation()
-                self.adjustMonitorCadence()
             }
         }
         nowPlayingCancellable = nowPlaying.objectWillChange.sink { [weak self] _ in
@@ -145,7 +144,7 @@ final class AppModel: ObservableObject {
                 self.syncNotchPresentation()
             }
         }
-        monitor.start(interval: settings.pollIntervalSeconds)
+        monitor.start()
         nowPlaying.start()
         applyStockWatcherSettings()
         applyLaunchAtLoginIfNeeded(oldValue: !settings.launchAtLogin)
@@ -383,13 +382,6 @@ final class AppModel: ObservableObject {
         guard size != lastPanelConfigSize else { return }
         lastPanelConfigSize = size
         onPanelConfigurationChanged?()
-    }
-
-    /// Idle: keep a short poll as a safety net; hook-dir watcher handles instant wake.
-    private func adjustMonitorCadence() {
-        let base = settings.pollIntervalSeconds
-        let interval = hasNotchContent ? base : min(base, 0.8)
-        monitor.setInterval(interval)
     }
 
     private func handleCompletionSideEffects() {

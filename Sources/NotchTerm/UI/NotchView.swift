@@ -120,5 +120,6 @@ enum NotchChrome {
     /// Shared horizontal inset so header / tabs / card share one left+right edge.
     /// Sized past the notch ear (`topRadius`) so chrome doesn't sit on the curve.
     static let contentInset: CGFloat = 30
-    static let bottomInset: CGFloat = 8
+    /// Slightly under side inset so the jump button sits clear of the bottom curve.
+    static let bottomInset: CGFloat = 16
 }

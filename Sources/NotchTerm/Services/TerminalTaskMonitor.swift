@@ -1,28 +1,31 @@
 import Darwin
 import Foundation
 
+/// Hook-driven tasks only (Cursor agent-state + zsh task-state). No `ps` / `lsof` scans.
 @MainActor
 final class TerminalTaskMonitor: ObservableObject {
     @Published private(set) var tasks: [TerminalTask] = []
     @Published private(set) var lastCompletion: TaskCompletionEvent?
 
-    /// Process / hook scan interval (honors settings.pollIntervalSeconds).
-    private var processInterval: TimeInterval = 1.2
-    private var timer: Timer?
     private var known: [String: TrackedTask] = [:]
     private var completionClearWork: DispatchWorkItem?
     private var refreshTask: Task<Void, Never>?
-    /// Bumped on start/pause so a cancelled scan cannot clear a newer refreshTask.
     private var refreshGeneration: UInt64 = 0
     private var refreshPending = false
     private var pendingRefreshWork: DispatchWorkItem?
     private var sessionNameCache: [String: String] = [:]
-    private var lastSummaryRefresh = Date.distantPast
-    private var lastRefreshStarted = Date.distantPast
-    private var forceNextRefresh = false
-    private var hookDirWatcher: DispatchSourceFileSystemObject?
-    private var hookDirFD: CInt = -1
     private var titleRefreshTask: Task<Void, Never>?
+    /// After empty/useless osascript, wait before retrying the same candidates.
+    private var titleRefreshCooldownUntil = Date.distantPast
+    private var titleRefreshLastCandidateKeys: Set<String> = []
+    private var watchers: [DirectoryWatcher] = []
+    private var aliveCheckTimer: Timer?
+
+    private let aliveCheckInterval: TimeInterval = 45
+    /// Coalesce hook FS bursts (agent can write many times per turn).
+    private let hookDebounceInterval: TimeInterval = 0.5
+    private let hookFollowUpInterval: TimeInterval = 0.2
+    private let titleRefreshFailureCooldown: TimeInterval = 60
 
     private struct TrackedTask {
         var pid: Int32
@@ -34,62 +37,43 @@ final class TerminalTaskMonitor: ObservableObject {
         var startedAt: Date
         var wasBusy: Bool
         var state: TerminalTaskState
-        var elapsed: String
         var completionEmitted: Bool
-        var idleStreak: Int
-        var busyStreak: Int
-        var lastCLIAt: Date?
-        var lastCPU: Double
-        var lastChildCount: Int
     }
 
-    func start(interval: TimeInterval = 1.2) {
-        processInterval = max(0.35, interval)
-        timer?.invalidate()
-        pendingRefreshWork?.cancel()
-        // Invalidate in-flight scans; generation stops a late finishRefresh from
-        // nil-ing a newer refreshTask (cancel alone does not stop Task.detached).
-        refreshTask?.cancel()
-        refreshTask = nil
-        refreshGeneration &+= 1
-        refreshPending = false
-        startHookDirectoryWatcher()
+    private final class DirectoryWatcher {
+        let source: DispatchSourceFileSystemObject
+        let fd: CInt
+        init(source: DispatchSourceFileSystemObject, fd: CInt) {
+            self.source = source
+            self.fd = fd
+        }
+    }
+
+    func start() {
+        pause()
+        startDirectoryWatchers()
+        startAliveCheckTimer()
         refresh(force: true)
-        let timer = Timer.scheduledTimer(withTimeInterval: processInterval, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refresh() }
-        }
-        timer.tolerance = min(0.2, processInterval * 0.2)
-        self.timer = timer
-    }
-
-    func setInterval(_ interval: TimeInterval) {
-        let next = max(0.35, interval)
-        guard abs(next - processInterval) > 0.01 else { return }
-        processInterval = next
-        timer?.invalidate()
-        let timer = Timer.scheduledTimer(withTimeInterval: processInterval, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refresh() }
-        }
-        timer.tolerance = min(0.2, processInterval * 0.2)
-        self.timer = timer
     }
 
     func pause() {
-        timer?.invalidate()
-        timer = nil
+        aliveCheckTimer?.invalidate()
+        aliveCheckTimer = nil
         pendingRefreshWork?.cancel()
         pendingRefreshWork = nil
         refreshTask?.cancel()
         refreshTask = nil
         refreshGeneration &+= 1
         refreshPending = false
-        stopHookDirectoryWatcher()
+        stopDirectoryWatchers()
         titleRefreshTask?.cancel()
         titleRefreshTask = nil
+        titleRefreshCooldownUntil = Date.distantPast
+        titleRefreshLastCandidateKeys = []
     }
 
     func resume() {
-        start(interval: processInterval)
+        start()
     }
 
     func clearCompletionBanner() {
@@ -97,41 +81,29 @@ final class TerminalTaskMonitor: ObservableObject {
         completionClearWork?.cancel()
     }
 
-    /// - Parameter force: bypass the min-interval floor (hook file writes).
     func refresh(force: Bool = false) {
-        if force { forceNextRefresh = true }
-
         if refreshTask != nil {
             refreshPending = true
             return
         }
 
-        // Floor interval so a slow collect cannot chain into a busy-loop.
-        // Hook-directory events set `force` so RUNNING appears immediately.
-        let sinceLast = Date().timeIntervalSince(lastRefreshStarted)
-        if !forceNextRefresh, sinceLast < processInterval * 0.5 {
+        if !force {
             refreshPending = true
-            schedulePendingRefresh(after: processInterval * 0.5 - sinceLast)
+            schedulePendingRefresh(after: hookDebounceInterval)
             return
         }
-        forceNextRefresh = false
 
-        lastRefreshStarted = Date()
-        let namesForCollect = sessionNameCache
         let generation = refreshGeneration
+        let namesForTitles = sessionNameCache
 
         refreshTask = Task { [weak self] in
             let snapshot = await Task.detached(priority: .utility) {
                 AgentHookService.pruneStaleStateFiles()
-                let hookStates = AgentHookService.loadStatesByPID()
-                return Self.collect(
-                    sessionNameCache: namesForCollect,
-                    hookStates: hookStates
-                )
+                ShellHookService.pruneStaleStateFiles()
+                return Self.collectFromHooks(sessionNameCache: namesForTitles)
             }.value
 
             guard let self else { return }
-            // Stale generation: a newer start/pause/refresh owns the slot.
             guard generation == self.refreshGeneration else { return }
             if Task.isCancelled {
                 self.finishRefresh(runAgain: false, generation: generation)
@@ -143,52 +115,44 @@ final class TerminalTaskMonitor: ObservableObject {
         }
     }
 
-    /// Titles via timed `osascript` off the main actor — never blocks busy/idle.
-    private func scheduleTitleRefreshIfNeeded() {
-        let stale = Date().timeIntervalSince(lastSummaryRefresh) > 3.0 || sessionNameCache.isEmpty
-        guard stale, titleRefreshTask == nil else { return }
-        titleRefreshTask = Task { [weak self] in
-            let names = await Task.detached(priority: .utility) {
-                Self.uniqueTTYNames(ITermController.listSessionSummaries())
-            }.value
-            guard let self else { return }
-            defer { self.titleRefreshTask = nil }
-            guard !Task.isCancelled else { return }
-            self.lastSummaryRefresh = Date()
-            if !names.isEmpty, names != self.sessionNameCache {
-                self.sessionNameCache = names
-                self.refresh(force: true)
+    // MARK: - Timers / watchers
+
+    private func startAliveCheckTimer() {
+        aliveCheckTimer?.invalidate()
+        let timer = Timer.scheduledTimer(withTimeInterval: aliveCheckInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.refresh(force: true) }
+        }
+        timer.tolerance = 5
+        aliveCheckTimer = timer
+    }
+
+    private func startDirectoryWatchers() {
+        stopDirectoryWatchers()
+        for dir in [AgentHookService.stateDirectory, ShellHookService.stateDirectory] {
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let fd = open(dir.path, O_EVTONLY)
+            guard fd >= 0 else { continue }
+            let source = DispatchSource.makeFileSystemObjectSource(
+                fileDescriptor: fd,
+                eventMask: [.write, .rename, .delete, .extend],
+                queue: .main
+            )
+            source.setEventHandler { [weak self] in
+                self?.refresh(force: false)
             }
+            source.setCancelHandler {
+                close(fd)
+            }
+            source.resume()
+            watchers.append(DirectoryWatcher(source: source, fd: fd))
         }
     }
 
-    private func startHookDirectoryWatcher() {
-        stopHookDirectoryWatcher()
-        let dir = AgentHookService.stateDirectory
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let fd = open(dir.path, O_EVTONLY)
-        guard fd >= 0 else { return }
-        hookDirFD = fd
-        let source = DispatchSource.makeFileSystemObjectSource(
-            fileDescriptor: fd,
-            eventMask: [.write, .rename, .delete, .extend, .attrib],
-            queue: .main
-        )
-        source.setEventHandler { [weak self] in
-            // Hook script just wrote running/idle — scan immediately.
-            self?.refresh(force: true)
+    private func stopDirectoryWatchers() {
+        for watcher in watchers {
+            watcher.source.cancel()
         }
-        source.setCancelHandler {
-            close(fd)
-        }
-        hookDirWatcher = source
-        source.resume()
-    }
-
-    private func stopHookDirectoryWatcher() {
-        hookDirWatcher?.cancel()
-        hookDirWatcher = nil
-        hookDirFD = -1
+        watchers = []
     }
 
     private func schedulePendingRefresh(after delay: TimeInterval) {
@@ -196,11 +160,9 @@ final class TerminalTaskMonitor: ObservableObject {
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.pendingRefreshWork = nil
-            if self.refreshPending, self.refreshTask == nil {
-                self.refreshPending = false
-                // Preserve hook-driven force so a coalesced wake still bypasses the floor.
-                self.refresh(force: self.forceNextRefresh)
-            }
+            guard self.refreshPending, self.refreshTask == nil else { return }
+            self.refreshPending = false
+            self.refresh(force: true)
         }
         pendingRefreshWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + max(0.05, delay), execute: work)
@@ -212,12 +174,80 @@ final class TerminalTaskMonitor: ObservableObject {
         let again = runAgain && refreshPending
         refreshPending = false
         guard again else { return }
-        let wait = max(0, processInterval * 0.5 - Date().timeIntervalSince(lastRefreshStarted))
-        if wait > 0.02 {
-            schedulePendingRefresh(after: wait)
-            refreshPending = true
-        } else {
-            refresh(force: true)
+        schedulePendingRefresh(after: hookFollowUpInterval)
+        refreshPending = true
+    }
+
+    /// iTerm titles only for *running* agents that have a tty and still need a name.
+    private func scheduleTitleRefreshIfNeeded() {
+        guard titleRefreshTask == nil else { return }
+
+        let candidates = known.values.filter { tracked in
+            guard tracked.kind == .agent, tracked.state == .running else { return false }
+            guard let tty = tracked.tty, !tty.isEmpty else { return false }
+            let needsFallbackTitle = tracked.title.isEmpty || tracked.title == "Cursor Agent"
+            let missingCache = sessionNameCache[tty] == nil
+            return needsFallbackTitle || missingCache
+        }
+        guard !candidates.isEmpty else { return }
+
+        let keys = Set(candidates.map { "\($0.pid):\($0.tty ?? "")" })
+        // Same set still unresolved → honor cooldown (empty Automation result, etc.).
+        if Date() < titleRefreshCooldownUntil, keys.isSubset(of: titleRefreshLastCandidateKeys) {
+            return
+        }
+        titleRefreshLastCandidateKeys = keys
+
+        titleRefreshTask = Task { [weak self] in
+            let names = await Task.detached(priority: .utility) {
+                Self.uniqueTTYNames(ITermController.listSessionSummaries())
+            }.value
+            guard let self else { return }
+            defer { self.titleRefreshTask = nil }
+            guard !Task.isCancelled else { return }
+
+            if names.isEmpty {
+                // iTerm down / Automation denied — don't hammer osascript.
+                self.titleRefreshCooldownUntil = Date().addingTimeInterval(self.titleRefreshFailureCooldown)
+                return
+            }
+
+            if names != self.sessionNameCache {
+                self.sessionNameCache = names
+            }
+            self.applyTitlesFromCache()
+
+            let stillNeed = self.known.values.contains { tracked in
+                guard tracked.kind == .agent, tracked.state == .running else { return false }
+                guard let tty = tracked.tty, !tty.isEmpty else { return false }
+                return tracked.title.isEmpty || tracked.title == "Cursor Agent"
+            }
+            if stillNeed {
+                // Got a session list but these ttys still have no usable name.
+                self.titleRefreshCooldownUntil = Date().addingTimeInterval(self.titleRefreshFailureCooldown)
+            } else {
+                self.titleRefreshCooldownUntil = Date.distantPast
+            }
+        }
+    }
+
+    private func applyTitlesFromCache() {
+        var changed = false
+        for id in known.keys {
+            guard var tracked = known[id], tracked.kind == .agent,
+                  let tty = tracked.tty,
+                  let name = sessionNameCache[tty],
+                  !name.isEmpty
+            else { continue }
+            let cleaned = Self.cleanedSessionTitle(name)
+            if !cleaned.isEmpty, tracked.title != cleaned {
+                tracked.title = cleaned
+                known[id] = tracked
+                changed = true
+            }
+        }
+        if changed {
+            publishTasks()
         }
     }
 
@@ -229,131 +259,229 @@ final class TerminalTaskMonitor: ObservableObject {
         return names
     }
 
-    // MARK: - Apply
+    nonisolated private static func cleanedSessionTitle(_ sessionName: String) -> String {
+        sessionName
+            .replacingOccurrences(
+                of: #"\s*\(agent\)\s*"#,
+                with: "",
+                options: [.regularExpression, .caseInsensitive]
+            )
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
-    private func apply(_ snapshot: CollectionResult) {
-        if let names = snapshot.sessionNames {
-            sessionNameCache = names
-            lastSummaryRefresh = Date()
+    // MARK: - Collect
+
+    private struct HookSnapshot: Sendable {
+        let rows: [HookRow]
+    }
+
+    private struct HookRow: Sendable {
+        let pid: Int32
+        let kind: TerminalTaskKind
+        let state: String
+        let command: String
+        let title: String
+        let cwd: String?
+        let tty: String?
+        let conversationId: String?
+        let alive: Bool
+    }
+
+    nonisolated private static func collectFromHooks(
+        sessionNameCache: [String: String]
+    ) -> HookSnapshot {
+        var rows: [HookRow] = []
+
+        for (pid, hook) in AgentHookService.loadStatesByPID() {
+            let alive = kill(pid, 0) == 0
+            let tty = hook.tty.map(ITermController.normalizedTTY)
+            let sessionName = tty.flatMap { sessionNameCache[$0] }
+            let title: String = {
+                if let sessionName, !sessionName.isEmpty {
+                    let cleaned = cleanedSessionTitle(sessionName)
+                    if !cleaned.isEmpty { return cleaned }
+                }
+                return "Cursor Agent"
+            }()
+            rows.append(
+                HookRow(
+                    pid: pid,
+                    kind: .agent,
+                    state: hook.state.rawValue,
+                    command: hook.conversationId.map { "agent --resume \($0)" } ?? "agent",
+                    title: title,
+                    cwd: hook.cwd,
+                    tty: tty,
+                    conversationId: hook.conversationId,
+                    alive: alive
+                )
+            )
         }
 
+        for (pid, task) in ShellHookService.loadStatesByPID() {
+            let alive = kill(pid, 0) == 0
+            let tty = task.tty.map(ITermController.normalizedTTY)
+            rows.append(
+                HookRow(
+                    pid: pid,
+                    kind: task.kind,
+                    state: task.state.rawValue,
+                    command: task.command,
+                    title: task.title.isEmpty ? task.kind.title : task.title,
+                    cwd: task.cwd,
+                    tty: tty,
+                    conversationId: nil,
+                    alive: alive
+                )
+            )
+        }
+
+        return HookSnapshot(rows: rows)
+    }
+
+    // MARK: - Apply
+
+    private func apply(_ snapshot: HookSnapshot) {
         var nextKnown: [String: TrackedTask] = [:]
         var completions: [TaskCompletionEvent] = []
         let now = Date()
 
-        for process in snapshot.processes {
-            let id = "pid-\(process.pid)"
+        for row in snapshot.rows {
+            let id = "\(row.kind.rawValue)-\(row.pid)"
+            let isBusy = row.state == "running"
+
+            if !row.alive {
+                if let previous = known[id], previous.wasBusy {
+                    completions.append(
+                        TaskCompletionEvent(
+                            id: UUID(),
+                            taskID: id,
+                            title: previous.title,
+                            subtitle: previous.kind == .agent ? "Agent session ended" : "Finished",
+                            kind: previous.kind,
+                            tty: previous.tty
+                        )
+                    )
+                }
+                continue
+            }
+
+            // git/npm: idle means the command finished — emit DONE, don't keep tracking.
+            if row.kind != .agent, !isBusy {
+                if let previous = known[id], previous.wasBusy, !previous.completionEmitted {
+                    completions.append(
+                        TaskCompletionEvent(
+                            id: UUID(),
+                            taskID: id,
+                            title: previous.title.isEmpty ? row.title : previous.title,
+                            subtitle: "Finished",
+                            kind: previous.kind,
+                            tty: previous.tty ?? row.tty
+                        )
+                    )
+                }
+                continue
+            }
+
             var tracked = known[id] ?? TrackedTask(
-                pid: process.pid,
-                kind: process.kind,
-                command: process.command,
-                title: process.title,
-                tty: process.tty,
-                workingDirectory: process.workingDirectory,
+                pid: row.pid,
+                kind: row.kind,
+                command: row.command,
+                title: row.title,
+                tty: row.tty,
+                workingDirectory: row.cwd.map { URL(fileURLWithPath: $0, isDirectory: true) },
                 startedAt: now,
                 wasBusy: false,
-                // Agents start idle until a hook says otherwise.
-                state: process.kind == .agent ? .idle : .running,
-                elapsed: process.elapsed,
-                completionEmitted: false,
-                idleStreak: 0,
-                busyStreak: 0,
-                lastCLIAt: nil,
-                lastCPU: 0,
-                lastChildCount: 0
+                state: row.kind == .agent ? .idle : .running,
+                completionEmitted: false
             )
 
-            tracked.command = process.command
-            // Agents: prefer iTerm session title over "Cursor Agent".
-            // git/npm: titles are always command-based (never iTerm names).
-            if process.title != kindFallbackTitle(process.kind, command: process.command)
-                || tracked.title.isEmpty
-                || tracked.title == kindFallbackTitle(tracked.kind, command: tracked.command)
-            {
-                tracked.title = process.title
-            }
-            tracked.tty = process.tty ?? tracked.tty
-            tracked.workingDirectory = process.workingDirectory ?? tracked.workingDirectory
-            tracked.elapsed = process.elapsed
-            tracked.kind = process.kind
-            tracked.lastCPU = process.cpu
-            tracked.lastChildCount = process.childCount
-            if process.fromHook {
-                tracked.lastCLIAt = now
-            }
-
-            if process.kind == .agent {
-                if process.isBusy {
-                    tracked.busyStreak += 1
-                    tracked.idleStreak = 0
-                    tracked.wasBusy = true
-                    tracked.state = .running
-                    // Next turn can emit DONE again after this one goes idle.
-                    tracked.completionEmitted = false
-                } else {
-                    // Hooks (or absence of hooks) → idle. No scrollback/transcript guessing.
-                    tracked.busyStreak = 0
-                    tracked.idleStreak += 1
-                    let becomingIdle = tracked.state != .idle
-                    tracked.state = .idle
-                    if tracked.wasBusy, becomingIdle, !tracked.completionEmitted {
-                        tracked.completionEmitted = true
-                        completions.append(
-                            TaskCompletionEvent(
-                                id: UUID(),
-                                taskID: id,
-                                title: tracked.title,
-                                subtitle: "Agent finished output",
-                                kind: .agent,
-                                tty: tracked.tty
-                            )
-                        )
-                    }
+            tracked.kind = row.kind
+            tracked.command = row.command
+            tracked.pid = row.pid
+            if row.kind == .agent {
+                if row.title != "Cursor Agent" || tracked.title.isEmpty || tracked.title == "Cursor Agent" {
+                    tracked.title = row.title
                 }
             } else {
-                tracked.state = .running
-                tracked.wasBusy = true
-                tracked.busyStreak += 1
-                tracked.idleStreak = 0
+                tracked.title = row.title
+            }
+            tracked.tty = row.tty ?? tracked.tty
+            if let cwd = row.cwd {
+                tracked.workingDirectory = URL(fileURLWithPath: cwd, isDirectory: true)
             }
 
-            nextKnown[id] = tracked
+            if isBusy {
+                if tracked.state != .running {
+                    tracked.startedAt = now
+                }
+                tracked.wasBusy = true
+                tracked.state = .running
+                tracked.completionEmitted = false
+                nextKnown[id] = tracked
+            } else {
+                // Agent idle: keep internally for DONE, hide from tabs via publish filter.
+                let becomingIdle = tracked.state != .idle
+                tracked.state = .idle
+                if tracked.wasBusy, becomingIdle, !tracked.completionEmitted {
+                    tracked.completionEmitted = true
+                    completions.append(
+                        TaskCompletionEvent(
+                            id: UUID(),
+                            taskID: id,
+                            title: tracked.title,
+                            subtitle: "Agent finished output",
+                            kind: .agent,
+                            tty: tracked.tty
+                        )
+                    )
+                }
+                nextKnown[id] = tracked
+            }
         }
 
         for (id, previous) in known where nextKnown[id] == nil {
-            if previous.kind != .agent || previous.wasBusy {
-                completions.append(
-                    TaskCompletionEvent(
-                        id: UUID(),
-                        taskID: id,
-                        title: previous.title,
-                        subtitle: previous.kind == .agent ? "Agent session ended" : "Finished",
-                        kind: previous.kind,
-                        tty: previous.tty
+            // Still present as idle git/npm file handled above; true drop = process gone / pruned.
+            if previous.wasBusy, previous.kind == .agent || previous.state == .running {
+                let already = completions.contains { $0.taskID == id }
+                if !already {
+                    completions.append(
+                        TaskCompletionEvent(
+                            id: UUID(),
+                            taskID: id,
+                            title: previous.title,
+                            subtitle: previous.kind == .agent ? "Agent session ended" : "Finished",
+                            kind: previous.kind,
+                            tty: previous.tty
+                        )
                     )
-                )
+                }
             }
         }
 
         known = nextKnown
-        // Publish only active work. Idle agents stay tracked internally (hooks still
-        // update them) but drop out of tabs — same mental model as finished git/npm.
-        tasks = nextKnown.values
-            .filter { tracked in
-                tracked.kind != .agent || tracked.state == .running
-            }
-            .map { tracked in
+        publishTasks()
+
+        if let event = completions.first {
+            present(event)
+        }
+    }
+
+    private func publishTasks() {
+        let next = known.values
+            .filter { $0.state == .running }
+            .map { tracked -> TerminalTask in
                 TerminalTask(
-                    id: "pid-\(tracked.pid)",
+                    id: "\(tracked.kind.rawValue)-\(tracked.pid)",
                     pid: tracked.pid,
                     kind: tracked.kind,
                     title: tracked.title,
-                    subtitle: subtitle(for: tracked),
+                    subtitle: "Running · \(Self.formatElapsed(since: tracked.startedAt))",
                     command: tracked.command,
                     tty: tracked.tty,
                     workingDirectory: tracked.workingDirectory,
                     state: tracked.state,
-                    elapsed: tracked.elapsed,
+                    elapsed: Self.formatElapsed(since: tracked.startedAt),
                     startedAt: tracked.startedAt
                 )
             }
@@ -364,20 +492,20 @@ final class TerminalTaskMonitor: ObservableObject {
                 return lhs.pid < rhs.pid
             }
 
-        if let event = completions.first {
-            present(event)
+        if next != tasks {
+            tasks = next
         }
     }
 
-    private func subtitle(for tracked: TrackedTask) -> String {
-        switch tracked.state {
-        case .running:
-            return "Running · \(tracked.elapsed)"
-        case .idle:
-            return "Waiting for input"
-        case .completed:
-            return "Done"
+    nonisolated private static func formatElapsed(since start: Date) -> String {
+        let seconds = max(0, Int(Date().timeIntervalSince(start)))
+        let h = seconds / 3600
+        let m = (seconds % 3600) / 60
+        let s = seconds % 60
+        if h > 0 {
+            return String(format: "%d:%02d:%02d", h, m, s)
         }
+        return String(format: "%d:%02d", m, s)
     }
 
     private func present(_ event: TaskCompletionEvent) {
@@ -391,317 +519,6 @@ final class TerminalTaskMonitor: ObservableObject {
         completionClearWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 4.5, execute: work)
     }
-
-    // MARK: - Collection
-
-    private struct CollectionResult: Sendable {
-        let processes: [RawProcess]
-        let sessionNames: [String: String]?
-    }
-
-    private struct RawProcess: Sendable {
-        let pid: Int32
-        let kind: TerminalTaskKind
-        let command: String
-        let title: String
-        let tty: String?
-        let workingDirectory: URL?
-        let elapsed: String
-        let cpu: Double
-        let childCount: Int
-        let isBusy: Bool
-        let fromHook: Bool
-    }
-
-    /// Process scan only — session titles come from a separate AppleScript path.
-    nonisolated private static func collect(
-        sessionNameCache: [String: String],
-        hookStates: [Int32: AgentHookService.HookState]
-    ) -> CollectionResult {
-        let iTermPIDs = iTermProcessIDs()
-        let processes = runningProcesses()
-        let parents = parentMap()
-        let sessionNames = sessionNameCache
-
-        var results: [RawProcess] = []
-        for process in processes {
-            guard let kind = classify(process.command) else { continue }
-
-            let tty = process.tty.map(ITermController.normalizedTTY)
-            let sessionName = tty.flatMap { sessionNames[$0] }
-            let underITerm = isUnderITerm(pid: process.pid, iTermRoots: iTermPIDs, parents: parents)
-            // Agents with a live hook match are tracked even if the iTerm parent
-            // walk fails (renamed binaries / unusual process trees).
-            let hookMatch = kind == .agent && AgentHookService.resolve(
-                pid: process.pid,
-                resumeID: resumeID(from: process.command),
-                tty: tty,
-                cwd: nil,
-                states: hookStates
-            ) != nil
-            guard underITerm || sessionName != nil || hookMatch else { continue }
-
-            let childCount = childProcessCount(pid: process.pid, parents: parents)
-
-            var isBusy = true
-            var fromHook = false
-            // Agents need cwd for hook matching; git/npm need it for the expanded Directory row.
-            let cwd = workingDirectory(pid: process.pid)
-
-            if kind == .agent {
-                let resumeID = resumeID(from: process.command)
-
-                // Agent busy/idle comes only from Cursor hooks.
-                if let hook = AgentHookService.resolve(
-                    pid: process.pid,
-                    resumeID: resumeID,
-                    tty: tty,
-                    cwd: cwd?.path,
-                    states: hookStates
-                ) {
-                    isBusy = hook.state == .running
-                    fromHook = true
-                } else {
-                    // No hook file yet → idle (do not guess via transcript/scrollback).
-                    isBusy = false
-                    fromHook = false
-                }
-            }
-
-            results.append(
-                RawProcess(
-                    pid: process.pid,
-                    kind: kind,
-                    command: process.command,
-                    title: displayTitle(kind: kind, command: process.command, sessionName: sessionName),
-                    tty: tty,
-                    workingDirectory: cwd,
-                    elapsed: process.elapsed,
-                    cpu: process.cpu,
-                    childCount: childCount,
-                    isBusy: isBusy,
-                    fromHook: fromHook
-                )
-            )
-        }
-
-        // Safety net: if a hook says RUNNING but the process scan missed the row
-        // (truncated `ps`, unusual argv), still surface the agent from the hook file.
-        let seen = Set(results.map(\.pid))
-        for (pid, hook) in hookStates where hook.state == .running && !seen.contains(pid) {
-            guard kill(pid, 0) == 0 else { continue }
-            let tty = hook.tty.map(ITermController.normalizedTTY)
-            let sessionName = tty.flatMap { sessionNames[$0] }
-            let command = "agent --resume \(hook.conversationId ?? "")"
-            results.append(
-                RawProcess(
-                    pid: pid,
-                    kind: .agent,
-                    command: command,
-                    title: displayTitle(kind: .agent, command: command, sessionName: sessionName),
-                    tty: tty,
-                    workingDirectory: hook.cwd.map { URL(fileURLWithPath: $0, isDirectory: true) },
-                    elapsed: "—",
-                    cpu: 0,
-                    childCount: 0,
-                    isBusy: true,
-                    fromHook: true
-                )
-            )
-        }
-
-        return CollectionResult(
-            processes: results,
-            sessionNames: nil
-        )
-    }
-
-    private func kindFallbackTitle(_ kind: TerminalTaskKind, command: String) -> String {
-        Self.displayTitle(kind: kind, command: command, sessionName: nil)
-    }
-
-    nonisolated private static func resumeID(from command: String) -> String? {
-        // Agent CLI uses both `--resume <uuid>` and `--resume=<uuid>`.
-        guard let regex = try? NSRegularExpression(
-            pattern: #"--resume(?:=|\s+)([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"#
-        ) else { return nil }
-        let range = NSRange(command.startIndex..<command.endIndex, in: command)
-        guard let match = regex.firstMatch(in: command, range: range),
-              let idRange = Range(match.range(at: 1), in: command)
-        else { return nil }
-        return String(command[idRange]).lowercased()
-    }
-
-    nonisolated private static func classify(_ command: String) -> TerminalTaskKind? {
-        let value = command.lowercased()
-
-        // Track the Cursor Agent CLI entrypoint only.
-        // The child `node …/index.js worker-server` also lives under share/cursor-agent
-        // and must not become a second tab with the same iTerm title.
-        if value.contains("worker-server") {
-            return nil
-        }
-        if value.contains("/.local/bin/agent")
-            || value.contains("/bin/agent --")
-            || value.contains("cursor-agent") && value.contains("index.js") && !value.contains("/node ")
-        {
-            return .agent
-        }
-
-        if value.range(
-            of: #"\bgit(\s+|-)(clone|fetch|pull)\b"#,
-            options: .regularExpression
-        ) != nil {
-            return .git
-        }
-
-        let packageMarkers = [
-            "npm run build", "npm run test", "npm run deploy", "npm install", "npm i ",
-            "pnpm build", "pnpm test", "pnpm install", "pnpm i ",
-            "yarn build", "yarn test", "yarn install",
-            "bun run build", "bun run test", "bun install", "bun i "
-        ]
-        if packageMarkers.contains(where: { value.contains($0) }) {
-            return .npm
-        }
-        if value.range(of: #"\bnpm\s+i\b"#, options: .regularExpression) != nil
-            || value.range(of: #"\bpnpm\s+i\b"#, options: .regularExpression) != nil
-            || value.range(of: #"\bbun\s+i\b"#, options: .regularExpression) != nil
-        {
-            return .npm
-        }
-        return nil
-    }
-
-    nonisolated private static func displayTitle(
-        kind: TerminalTaskKind,
-        command: String,
-        sessionName: String?
-    ) -> String {
-        // Only agents use the iTerm session title; git/npm always show the command.
-        if kind == .agent, let sessionName, !sessionName.isEmpty {
-            let cleaned = sessionName
-                .replacingOccurrences(
-                    of: #"\s*\(agent\)\s*"#,
-                    with: "",
-                    options: [.regularExpression, .caseInsensitive]
-                )
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            if !cleaned.isEmpty { return cleaned }
-        }
-        switch kind {
-        case .agent:
-            return "Cursor Agent"
-        case .git:
-            if command.lowercased().contains("clone") { return "git clone" }
-            if command.lowercased().contains("fetch") { return "git fetch" }
-            return "git pull"
-        case .npm:
-            let lower = command.lowercased()
-            if lower.contains("npm run deploy") { return "npm run deploy" }
-            if lower.contains("npm run build") { return "npm run build" }
-            if lower.contains("npm run test") { return "npm run test" }
-            if lower.contains("npm install") || lower.range(of: #"\bnpm\s+i\b"#, options: .regularExpression) != nil {
-                return "npm install"
-            }
-            let tokens = command.split(separator: " ").suffix(4).joined(separator: " ")
-            return tokens.isEmpty ? "Package task" : tokens
-        }
-    }
-
-    private struct ProcRow: Sendable {
-        let pid: Int32
-        let ppid: Int32
-        let tty: String?
-        let cpu: Double
-        let elapsed: String
-        let command: String
-    }
-
-    nonisolated private static func runningProcesses() -> [ProcRow] {
-        let output = ShellCommand.run("/bin/ps", ["-axo", "pid=,ppid=,tty=,%cpu=,etime=,command="])
-        return output.split(separator: "\n").compactMap { line -> ProcRow? in
-            let parts = line.split(maxSplits: 5, whereSeparator: \Character.isWhitespace).map(String.init)
-            guard parts.count == 6,
-                  let pid = Int32(parts[0]),
-                  let ppid = Int32(parts[1]),
-                  let cpu = Double(parts[3]) else { return nil }
-            let ttyRaw = parts[2]
-            let tty = (ttyRaw == "??" || ttyRaw.isEmpty) ? nil : ITermController.normalizedTTY(ttyRaw)
-            return ProcRow(
-                pid: pid,
-                ppid: ppid,
-                tty: tty,
-                cpu: cpu,
-                elapsed: parts[4],
-                command: parts[5]
-            )
-        }
-    }
-
-    nonisolated private static func iTermProcessIDs() -> Set<Int32> {
-        let output = ShellCommand.run("/bin/ps", ["-axo", "pid=,command="])
-        var ids = Set<Int32>()
-        for line in output.split(separator: "\n") {
-            let parts = line.split(maxSplits: 1, whereSeparator: \Character.isWhitespace).map(String.init)
-            guard parts.count == 2, let pid = Int32(parts[0]) else { continue }
-            let command = parts[1]
-            // Prefer path/binary markers — avoid matching unrelated shell lines that
-            // merely mention iTerm in their argv.
-            let isITerm =
-                command.contains("/Applications/iTerm.app/")
-                || command.contains("/iTerm2/iTermServer")
-                || command.hasSuffix("/MacOS/iTerm2")
-                || command.contains("/MacOS/ShellLauncher")
-            if isITerm {
-                ids.insert(pid)
-            }
-        }
-        return ids
-    }
-
-    nonisolated private static func isUnderITerm(
-        pid: Int32,
-        iTermRoots: Set<Int32>,
-        parents: [Int32: Int32]
-    ) -> Bool {
-        // If iTerm isn't running, never treat arbitrary processes as supervised.
-        guard !iTermRoots.isEmpty else { return false }
-        var current = pid
-        for _ in 0..<32 {
-            if iTermRoots.contains(current) { return true }
-            guard let parent = parents[current], parent > 0, parent != current else { return false }
-            current = parent
-        }
-        return false
-    }
-
-    nonisolated private static func parentMap() -> [Int32: Int32] {
-        let output = ShellCommand.run("/bin/ps", ["-axo", "pid=,ppid="])
-        var map: [Int32: Int32] = [:]
-        for line in output.split(separator: "\n") {
-            let parts = line.split(whereSeparator: \Character.isWhitespace).map(String.init)
-            guard parts.count >= 2, let pid = Int32(parts[0]), let ppid = Int32(parts[1]) else { continue }
-            map[pid] = ppid
-        }
-        return map
-    }
-
-    nonisolated private static func childProcessCount(pid: Int32, parents: [Int32: Int32]) -> Int {
-        parents.values.filter { $0 == pid }.count
-    }
-
-    nonisolated private static func workingDirectory(pid: Int32) -> URL? {
-        let output = ShellCommand.run(
-            "/usr/sbin/lsof",
-            ["-a", "-p", String(pid), "-d", "cwd", "-Fn"],
-            timeout: 0.8
-        )
-        guard let pathLine = output.split(separator: "\n").first(where: { $0.first == "n" }) else {
-            return nil
-        }
-        return URL(fileURLWithPath: String(pathLine.dropFirst()), isDirectory: true)
-    }
 }
 
 enum ShellCommand {
@@ -713,15 +530,6 @@ enum ShellCommand {
         String(data: runData(executable, arguments, timeout: timeout), encoding: .utf8) ?? ""
     }
 
-    /// Runs a process with a wall-clock timeout.
-    /// Stdout is drained on a background thread *while* the child runs — waiting
-    /// for exit before reading deadlocks once output exceeds the pipe buffer
-    /// (~64KB). A full `ps -axo …,command=` listing is often larger than that.
-    ///
-    /// Must not use `readDataToEndOfFile()` / `readDataOfLength:`: closing the
-    /// read end on timeout races the drain thread and raises an uncaught ObjC
-    /// `NSFileHandle` exception → `abort()` (SIGABRT). Prefer the throwing
-    /// `read(upToCount:)` API and keep any bytes already drained.
     static func runData(
         _ executable: String,
         _ arguments: [String],
@@ -741,8 +549,6 @@ enum ShellCommand {
         group.enter()
         DispatchQueue.global(qos: .utility).async {
             defer { group.leave() }
-            // Concurrent drain — EOF when the child closes stdout, or an error
-            // when the timeout path closes the read end.
             var chunks = Data()
             do {
                 while true {
@@ -750,9 +556,7 @@ enum ShellCommand {
                     if chunk.isEmpty { break }
                     chunks.append(chunk)
                 }
-            } catch {
-                // Closed / interrupted pipe after terminate — keep partial output.
-            }
+            } catch {}
             box.append(chunks)
         }
 
@@ -776,7 +580,6 @@ enum ShellCommand {
                 Thread.sleep(forTimeInterval: 0.015)
             }
             if process.isRunning {
-                // Hard-kill stuck children (e.g. osascript wedged in Apple Events).
                 kill(process.processIdentifier, SIGKILL)
                 let hard = Date().addingTimeInterval(0.2)
                 while process.isRunning, Date() < hard {
@@ -785,7 +588,6 @@ enum ShellCommand {
             }
         }
 
-        // Unblock a drain that never saw EOF (zombie / stuck writer).
         if group.wait(timeout: .now() + 0.25) == .timedOut {
             try? stdout.close()
             _ = group.wait(timeout: .now() + 0.25)
@@ -799,8 +601,8 @@ enum ShellCommand {
 
         func append(_ data: Data) {
             lock.lock()
+            defer { lock.unlock() }
             storage.append(data)
-            lock.unlock()
         }
 
         var data: Data {

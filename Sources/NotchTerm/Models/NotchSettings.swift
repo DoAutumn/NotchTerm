@@ -15,10 +15,10 @@ struct NotchSettings: Codable, Equatable, Sendable {
     var compactWidth = 460.0
     var compactHeight = 38.0
     var expandedWidth = 520.0
-    var expandedHeight = 220.0
+    /// Compact strip + header / tab / detail / jump button + bottom inset.
+    var expandedHeight = 176.0
     var collapseDelay = 0.18
     var verticalOffset = 0.0
-    var pollIntervalSeconds = 1.2
 
     /// 股票监视总开关；关闭后不拉行情、不改菜单栏标题、不提醒。
     var stockWatcherEnabled = false
@@ -34,7 +34,6 @@ struct NotchSettings: Codable, Equatable, Sendable {
         expandedHeight = expandedHeight.clamped(to: Self.expandedHeightRange)
         collapseDelay = collapseDelay.clamped(to: 0.12...1.2)
         verticalOffset = verticalOffset.clamped(to: 0...40)
-        pollIntervalSeconds = pollIntervalSeconds.clamped(to: 0.6...3.0)
         if !StockRefreshSettings.options.contains(stockRefreshIntervalSeconds) {
             stockRefreshIntervalSeconds = StockRefreshSettings.defaultInterval
         }

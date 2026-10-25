@@ -139,30 +139,50 @@ def atomic_write(path, data):
         json.dump(data, fh, separators=(",", ":"))
     os.replace(tmp, path)
 
-errors = []
-for name, enabled in (
-    (f"pid-{pid}.json", True),
-    (f"conv-{conversation_id}.json", bool(conversation_id)),
-    (f"tty-{tty}.json", bool(tty)),
-):
-    if not enabled:
-        continue
-    try:
-        atomic_write(os.path.join(state_dir, name), doc)
-    except Exception as exc:
-        errors.append(f"{name}:{exc!r}")
-
+# One file per agent PID. conversationId/tty/cwd live inside the JSON so
+# NotchTerm resolve() still works — no conv-/tty- duplicates (those multiplied
+# FSEvents during busy turns).
+path = os.path.join(state_dir, f"pid-{pid}.json")
+skip = False
 try:
-    os.makedirs(state_dir, exist_ok=True)
-    with open(log_path, "a", encoding="utf-8") as fh:
-        if errors:
-            fh.write(f"{time.time()} write_error {' | '.join(errors)}\n")
-        else:
-            fh.write(
-                f"{time.time()} ok state={state} pid={pid} conv={conversation_id} tty={tty} cwd={cwd}\n"
-            )
+    if os.path.isfile(path):
+        with open(path, "r", encoding="utf-8") as fh:
+            old = json.load(fh)
+        same = (
+            old.get("state") == state
+            and int(old.get("pid") or 0) == pid
+            and (old.get("conversationId") or "") == (conversation_id or "")
+            and (old.get("cwd") or "") == (cwd or "")
+            and (old.get("tty") or "") == (tty or "")
+        )
+        if same:
+            age = time.time() - float(old.get("updatedAt") or 0)
+            # running→running no-ops: skip unless keep-alive for the 6h prune window.
+            if state == "idle" or age < 300:
+                skip = True
 except Exception:
-    pass
+    skip = False
+
+errors = []
+if not skip:
+    try:
+        atomic_write(path, doc)
+    except Exception as exc:
+        errors.append(f"pid-{pid}.json:{exc!r}")
+
+# Log only when we wrote or failed — appending every hook would wake the watcher.
+if not skip or errors:
+    try:
+        os.makedirs(state_dir, exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as fh:
+            if errors:
+                fh.write(f"{time.time()} write_error {' | '.join(errors)}\n")
+            else:
+                fh.write(
+                    f"{time.time()} ok state={state} pid={pid} conv={conversation_id} tty={tty} cwd={cwd}\n"
+                )
+    except Exception:
+        pass
 
 # beforeSubmitPrompt must allow continue
 print("{}")

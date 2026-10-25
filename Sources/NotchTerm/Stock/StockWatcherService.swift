@@ -152,7 +152,10 @@ final class StockWatcherService: ObservableObject {
 
     private func handleQuotesUpdated() {
         let wasTrading = isTradingHours
-        tickers = QuoteService.shared.tickers
+        let next = QuoteService.shared.tickers
+        if next != tickers {
+            tickers = next
+        }
         refreshTradingState()
         updateMenuBarDisplay(animated: false)
         evaluateAlerts()

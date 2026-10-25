@@ -18,7 +18,8 @@ let package = Package(
                 .copy("Resources/TrayIconTemplate.png"),
                 .copy("Resources/TrayIconTemplate@2x.png"),
                 .copy("Resources/TrayIconTemplate@3x.png"),
-                .copy("Resources/notchterm-agent-hook.sh")
+                .copy("Resources/notchterm-agent-hook.sh"),
+                .copy("Resources/notchterm-shell.zsh")
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v5)

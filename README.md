@@ -1,6 +1,6 @@
 # NotchTerm
 
-Long-running iTerm tasks in your Mac’s notch — git, package builds, and Cursor Agent.
+Cursor Agent and long git / package tasks in your Mac’s notch — driven by hooks, not process scanning.
 
 [![macOS 13+](https://img.shields.io/badge/macOS-13%2B-black?logo=apple)](https://developer.apple.com/macos/)
 [![Apple Silicon](https://img.shields.io/badge/CPU-Apple%20Silicon-black?logo=apple)](https://support.apple.com/en-us/HT211814)
@@ -10,11 +10,13 @@ Long-running iTerm tasks in your Mac’s notch — git, package builds, and Curs
 
 ## What it does
 
-- Watches **iTerm** for long tasks: `git clone|fetch|pull`, `npm` / `pnpm` / `yarn` / `bun` install·build·test, and **Cursor Agent** (`agent` / `cursor-agent`)
-- Shows active work in the notch (compact strip; hover or click to expand). Multiple tasks → current tab + `+N` menu
-- **Cursor Agent busy/idle** comes only from CLI [hooks](docs/CURSOR-HOOKS.md) (`beforeSubmitPrompt` / `preCompact` → RUNNING, `stop` / `afterAgentResponse` → IDLE). No scrollback or transcript guessing
-- Idle agents stay out of the notch; when an agent finishes a turn, a short **DONE** banner appears (~4.5s) — click it to jump to that iTerm session
+- Shows **Cursor Agent** and long **git** / **npm·pnpm·yarn·bun** work in the notch (compact strip; hover or click to expand)
+- **No process-table polling.** Signals come from:
+  - Cursor Agent CLI [hooks](docs/CURSOR-HOOKS.md)
+  - zsh [shell hooks](docs/SHELL-HOOKS.md) in **iTerm** (`preexec` / `precmd`)
+- Idle agents stay out of the notch; when a turn or long command finishes, a short **DONE** banner appears (~4.5s) — click it to jump to that iTerm session
 - Click a running task to **focus its iTerm tab**
+- Optional Music Player now-playing and stock watcher in the same strip
 - Menu-bar accessory app; optional Login Items and completion notifications (notifications default **off**)
 
 ## Requirements
@@ -23,6 +25,7 @@ Long-running iTerm tasks in your Mac’s notch — git, package builds, and Curs
 - **Apple Silicon** (arm64). The release `.app` is arm64-only
 - [iTerm2](https://iterm2.com/)
 - Cursor Agent CLI for agent busy/idle (hooks install on first NotchTerm launch)
+- **zsh** for git/package task notifications (snippet installed into `~/.zshrc` on launch)
 
 ## Build & run
 
@@ -44,13 +47,17 @@ DMG / zip (optional):
 ./scripts/build-zip.sh
 ```
 
-## Cursor Agent hooks
+## Hooks
 
-On launch, NotchTerm merges its hooks into `~/.cursor/hooks.json` and installs `~/.cursor/hooks/notchterm-agent-hook.sh`.
+On launch, NotchTerm:
 
-After installing or updating NotchTerm (or reinstalling Cursor), **open NotchTerm once**, then **restart each `agent` session** so the CLI reloads hooks.
+1. Merges Cursor hooks into `~/.cursor/hooks.json` and installs `notchterm-agent-hook.sh`
+2. Installs `notchterm-shell.zsh` and a marked snippet in `~/.zshrc`
 
-Details and troubleshooting: [docs/CURSOR-HOOKS.md](docs/CURSOR-HOOKS.md).
+After installing or updating NotchTerm: **open NotchTerm once**, then **restart agent sessions** and **open a new iTerm tab** (or `source ~/.zshrc`) so hooks reload.
+
+- Agent details: [docs/CURSOR-HOOKS.md](docs/CURSOR-HOOKS.md)
+- Shell details: [docs/SHELL-HOOKS.md](docs/SHELL-HOOKS.md)
 
 ## Permissions
 
@@ -60,7 +67,7 @@ Ad-hoc signed local builds may need to re-grant Automation after each rebuild; a
 
 ## Privacy
 
-100% local. No accounts, no telemetry, no cloud sync. Agent state files live under `~/Library/Application Support/com.doautumn.notchterm/`.
+100% local. No accounts, no telemetry, no cloud sync. State files live under `~/Library/Application Support/com.doautumn.notchterm/`.
 
 ## License
 

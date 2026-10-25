@@ -10,7 +10,6 @@ final class NowPlayingMonitor: ObservableObject {
     @Published private(set) var isPlaying = false
 
     private var observer: NSObjectProtocol?
-    private var timer: Timer?
 
     var showsInNotch: Bool {
         isPlaying && !title.isEmpty
@@ -18,11 +17,6 @@ final class NowPlayingMonitor: ObservableObject {
 
     func start() {
         reload()
-        timer = Timer.scheduledTimer(withTimeInterval: 0.8, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.reload()
-            }
-        }
         observer = DistributedNotificationCenter.default().addObserver(
             forName: Self.notification,
             object: nil,
@@ -43,8 +37,9 @@ final class NowPlayingMonitor: ObservableObject {
         let playing = (userInfo?["playing"] as? Bool)
             ?? (userInfo?["playing"] as? NSNumber)?.boolValue
             ?? false
-        title = name
-        isPlaying = playing && !name.isEmpty
+        let nextPlaying = playing && !name.isEmpty
+        if title != name { title = name }
+        if isPlaying != nextPlaying { isPlaying = nextPlaying }
     }
 
     private func reload() {
@@ -62,8 +57,8 @@ final class NowPlayingMonitor: ObservableObject {
     }
 
     private func clear() {
-        title = ""
-        isPlaying = false
+        if !title.isEmpty { title = "" }
+        if isPlaying { isPlaying = false }
     }
 
     private var musicPlayerIsRunning: Bool {

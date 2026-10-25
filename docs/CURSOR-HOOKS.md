@@ -1,6 +1,6 @@
 # Cursor 钩子与重装说明
 
-NotchTerm 用 Cursor Agent CLI 的 hooks 判断 Agent 是 RUNNING 还是 IDLE。相关文件写在用户目录的 `~/.cursor/` 下，**不属于 NotchTerm.app 本身**。
+NotchTerm **只靠** Cursor Agent CLI 的 hooks 判断 Agent 是否出现、以及 RUNNING / IDLE（不做进程表扫描）。相关文件写在用户目录的 `~/.cursor/` 下，**不属于 NotchTerm.app 本身**。
 
 ## NotchTerm 会改动哪些路径
 

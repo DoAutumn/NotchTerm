@@ -77,6 +77,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         _ = AgentHookService.ensureInstalled()
+        _ = ShellHookService.ensureInstalled()
         notchController = NotchWindowController(model: model, screenManager: screenManager)
         settingsController = SettingsWindowController(model: model, screenManager: screenManager)
         menuBarController = MenuBarController(model: model)

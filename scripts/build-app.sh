@@ -41,7 +41,7 @@ cp "$BIN_DIR/NotchTerm" "$CONTENTS_PATH/MacOS/NotchTerm"
 if [ -d "$BIN_DIR/NotchTerm_NotchTerm.bundle" ]; then
     cp -R "$BIN_DIR/NotchTerm_NotchTerm.bundle" "$CONTENTS_PATH/Resources/"
 fi
-for asset in TrayIconTemplate.png TrayIconTemplate@2x.png TrayIconTemplate@3x.png notchterm-agent-hook.sh; do
+for asset in TrayIconTemplate.png TrayIconTemplate@2x.png TrayIconTemplate@3x.png notchterm-agent-hook.sh notchterm-shell.zsh; do
     if [ -f "$PROJECT_DIR/Sources/NotchTerm/Resources/$asset" ]; then
         cp "$PROJECT_DIR/Sources/NotchTerm/Resources/$asset" "$CONTENTS_PATH/Resources/"
     fi
