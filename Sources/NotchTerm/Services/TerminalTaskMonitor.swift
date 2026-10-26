@@ -25,7 +25,10 @@ final class TerminalTaskMonitor: ObservableObject {
     /// Coalesce hook FS bursts (agent can write many times per turn).
     private let hookDebounceInterval: TimeInterval = 0.5
     private let hookFollowUpInterval: TimeInterval = 0.2
+    /// osascript empty / Automation denied.
     private let titleRefreshFailureCooldown: TimeInterval = 60
+    /// iTerm still has a placeholder name — chat title usually appears within a few seconds.
+    private let titleRefreshPlaceholderCooldown: TimeInterval = 3
 
     private struct TrackedTask {
         var pid: Int32
@@ -33,6 +36,7 @@ final class TerminalTaskMonitor: ObservableObject {
         var command: String
         var title: String
         var tty: String?
+        var conversationId: String?
         var workingDirectory: URL?
         var startedAt: Date
         var wasBusy: Bool
@@ -178,14 +182,14 @@ final class TerminalTaskMonitor: ObservableObject {
         refreshPending = true
     }
 
-    /// iTerm titles only for *running* agents that have a tty and still need a name.
+    /// iTerm titles only for *running* agents that have a tty and still need a real chat name.
     private func scheduleTitleRefreshIfNeeded() {
         guard titleRefreshTask == nil else { return }
 
         let candidates = known.values.filter { tracked in
             guard tracked.kind == .agent, tracked.state == .running else { return false }
             guard let tty = tracked.tty, !tty.isEmpty else { return false }
-            let needsFallbackTitle = tracked.title.isEmpty || tracked.title == "Cursor Agent"
+            let needsFallbackTitle = Self.isPlaceholderAgentTitle(tracked.title)
             let missingCache = sessionNameCache[tty] == nil
             return needsFallbackTitle || missingCache
         }
@@ -220,11 +224,21 @@ final class TerminalTaskMonitor: ObservableObject {
             let stillNeed = self.known.values.contains { tracked in
                 guard tracked.kind == .agent, tracked.state == .running else { return false }
                 guard let tty = tracked.tty, !tty.isEmpty else { return false }
-                return tracked.title.isEmpty || tracked.title == "Cursor Agent"
+                return Self.isPlaceholderAgentTitle(tracked.title)
             }
             if stillNeed {
-                // Got a session list but these ttys still have no usable name.
-                self.titleRefreshCooldownUntil = Date().addingTimeInterval(self.titleRefreshFailureCooldown)
+                // Placeholder like "Cursor Agent（Python）" — retry soon; chat title arrives later.
+                self.titleRefreshCooldownUntil = Date().addingTimeInterval(self.titleRefreshPlaceholderCooldown)
+                let keysSnapshot = self.titleRefreshLastCandidateKeys
+                DispatchQueue.main.asyncAfter(
+                    deadline: .now() + self.titleRefreshPlaceholderCooldown + 0.05
+                ) { [weak self] in
+                    guard let self else { return }
+                    // Only re-kick if we are still waiting on the same placeholders.
+                    if self.titleRefreshLastCandidateKeys == keysSnapshot {
+                        self.scheduleTitleRefreshIfNeeded()
+                    }
+                }
             } else {
                 self.titleRefreshCooldownUntil = Date.distantPast
             }
@@ -240,7 +254,17 @@ final class TerminalTaskMonitor: ObservableObject {
                   !name.isEmpty
             else { continue }
             let cleaned = Self.cleanedSessionTitle(name)
-            if !cleaned.isEmpty, tracked.title != cleaned {
+            guard !cleaned.isEmpty else { continue }
+            if Self.isPlaceholderAgentTitle(cleaned) {
+                // Don't lock onto job leftovers ("Cursor Agent（Python）"); keep refreshing.
+                if Self.isPlaceholderAgentTitle(tracked.title), tracked.title != "Cursor Agent" {
+                    tracked.title = "Cursor Agent"
+                    known[id] = tracked
+                    changed = true
+                }
+                continue
+            }
+            if tracked.title != cleaned {
                 tracked.title = cleaned
                 known[id] = tracked
                 changed = true
@@ -259,6 +283,7 @@ final class TerminalTaskMonitor: ObservableObject {
         return names
     }
 
+    /// Strip iTerm's trailing " (agent)" job marker.
     nonisolated private static func cleanedSessionTitle(_ sessionName: String) -> String {
         sessionName
             .replacingOccurrences(
@@ -267,6 +292,24 @@ final class TerminalTaskMonitor: ObservableObject {
                 options: [.regularExpression, .caseInsensitive]
             )
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// New chats often show "Cursor Agent（Python）" / bare job names before the real title exists.
+    nonisolated private static func isPlaceholderAgentTitle(_ title: String) -> Bool {
+        let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if t.isEmpty { return true }
+        if t.caseInsensitiveCompare("Cursor Agent") == .orderedSame { return true }
+        if t.caseInsensitiveCompare("agent") == .orderedSame { return true }
+        if t.range(
+            of: #"^Cursor Agent\s*[（(][^）)]*[）)]$"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil {
+            return true
+        }
+        let bare: Set<String> = [
+            "python", "python3", "node", "nodejs", "zsh", "bash", "sh", "fish", "ruby", "java"
+        ]
+        return bare.contains(t.lowercased())
     }
 
     // MARK: - Collect
@@ -299,7 +342,9 @@ final class TerminalTaskMonitor: ObservableObject {
             let title: String = {
                 if let sessionName, !sessionName.isEmpty {
                     let cleaned = cleanedSessionTitle(sessionName)
-                    if !cleaned.isEmpty { return cleaned }
+                    if !cleaned.isEmpty, !isPlaceholderAgentTitle(cleaned) {
+                        return cleaned
+                    }
                 }
                 return "Cursor Agent"
             }()
@@ -389,6 +434,7 @@ final class TerminalTaskMonitor: ObservableObject {
                 command: row.command,
                 title: row.title,
                 tty: row.tty,
+                conversationId: row.conversationId,
                 workingDirectory: row.cwd.map { URL(fileURLWithPath: $0, isDirectory: true) },
                 startedAt: now,
                 wasBusy: false,
@@ -400,8 +446,26 @@ final class TerminalTaskMonitor: ObservableObject {
             tracked.command = row.command
             tracked.pid = row.pid
             if row.kind == .agent {
-                if row.title != "Cursor Agent" || tracked.title.isEmpty || tracked.title == "Cursor Agent" {
+                let newConv = row.conversationId
+                if let newConv, !newConv.isEmpty, newConv != tracked.conversationId {
+                    // New chat on the same agent PID — drop previous conversation's title.
+                    tracked.conversationId = newConv
+                    tracked.title = "Cursor Agent"
+                    if let tty = row.tty ?? tracked.tty {
+                        sessionNameCache.removeValue(forKey: tty)
+                    }
+                    titleRefreshCooldownUntil = Date.distantPast
+                    titleRefreshLastCandidateKeys = []
+                } else if tracked.conversationId == nil {
+                    tracked.conversationId = newConv
+                }
+
+                let rowPlaceholder = Self.isPlaceholderAgentTitle(row.title)
+                let trackedPlaceholder = Self.isPlaceholderAgentTitle(tracked.title)
+                if !rowPlaceholder {
                     tracked.title = row.title
+                } else if trackedPlaceholder {
+                    tracked.title = "Cursor Agent"
                 }
             } else {
                 tracked.title = row.title

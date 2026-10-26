@@ -10,7 +10,7 @@ import os
 import shutil
 import subprocess
 import sys
-from PIL import Image, ImageDraw
+from PIL import Image, ImageChops, ImageDraw
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 ASSET_DIR = sys.argv[1] if len(sys.argv) > 1 else \
@@ -48,7 +48,7 @@ def draw_foreground(d: ImageDraw.ImageDraw, sz: int):
     notch = [nx0, ny0, nx0 + notch_w, ny0 + notch_h]
     d.rounded_rectangle(notch, radius=notch_h / 2, fill=ink)
 
-    # Prompt `>_` — center the group in the content well.
+    # Prompt `>_` — drawn large (via supersample in draw_icon), then downscaled for smooth AA.
     content_top = ny0 + notch_h + bh * 0.06
     content_bot = body[3] - lw
     cy = (content_top + content_bot) / 2
@@ -61,7 +61,7 @@ def draw_foreground(d: ImageDraw.ImageDraw, sz: int):
     group_left = body[0] + (bw - group_w) / 2 - bw * 0.02
     tip_x = group_left + span
     back_x = group_left
-    plw = max(1, int(sz * 0.048))
+    plw = max(2, int(round(sz * 0.052)))
     r = plw / 2.0
 
     d.line([(back_x, cy - half_h), (tip_x, cy)], fill=accent, width=plw)
@@ -80,45 +80,100 @@ def draw_foreground(d: ImageDraw.ImageDraw, sz: int):
 
 
 def superellipse_mask(size: int, n: float) -> Image.Image:
+    """Coverage-sampled superellipse (soft edge). Avoids white halo from binary cutouts."""
     mask = Image.new("L", (size, size), 0)
     px = mask.load()
     half = size / 2.0
+    # Sub-pixel samples per axis; keep cheap on huge supersampled canvases.
+    grid = (-0.25, 0.25)
+    samples = len(grid) * len(grid)
     for y in range(size):
         for x in range(size):
-            if abs((x - half) / half) ** n + abs((y - half) / half) ** n <= 1.0:
-                px[x, y] = 255
+            inside = 0
+            for dy in grid:
+                for dx in grid:
+                    nx = abs((x + 0.5 + dx - half) / half)
+                    ny = abs((y + 0.5 + dy - half) / half)
+                    if nx ** n + ny ** n <= 1.0:
+                        inside += 1
+            if inside:
+                px[x, y] = int(round(255 * inside / samples))
     return mask
 
 
-def draw_icon(canvas: int) -> Image.Image:
-    pad = int(canvas * PAD_RATIO)
+def _render(canvas: int) -> Image.Image:
+    pad = int(round(canvas * PAD_RATIO))
     sz = canvas - 2 * pad
+    if sz < 1:
+        raise ValueError(f"canvas {canvas} is too small for padding")
 
     bg = Image.new("RGBA", (sz, sz), (0, 0, 0, 255))
     d = ImageDraw.Draw(bg)
+    px = bg.load()
     for y in range(sz):
         t = y / max(sz - 1, 1)
         row = (
             int(BG_FROM[0] + (BG_TO[0] - BG_FROM[0]) * t),
             int(BG_FROM[1] + (BG_TO[1] - BG_FROM[1]) * t),
             int(BG_FROM[2] + (BG_TO[2] - BG_FROM[2]) * t),
+            255,
         )
-        d.line([(0, y), (sz, y)], fill=row + (255,))
+        for x in range(sz):
+            px[x, y] = row
 
     draw_foreground(d, sz)
-
-    if sz >= 32:
-        bg.putalpha(superellipse_mask(sz, SUPERELLIPSE_N))
-    else:
-        m = Image.new("L", (sz, sz), 0)
-        ImageDraw.Draw(m).rounded_rectangle(
-            [0, 0, sz - 1, sz - 1], radius=int(sz * 0.32), fill=255
-        )
-        bg.putalpha(m)
+    # Always superellipse — small sizes get smoothness from supersampling below.
+    bg.putalpha(superellipse_mask(sz, SUPERELLIPSE_N))
 
     out = Image.new("RGBA", (canvas, canvas), (0, 0, 0, 0))
     out.paste(bg, (pad, pad), bg)
     return out
+
+
+def _resize_premultiplied(im: Image.Image, size: tuple[int, int]) -> Image.Image:
+    """LANCZOS on straight alpha fringes light colors into the edge; premultiply first."""
+    r, g, b, a = im.split()
+    r = ImageChops.multiply(r, a)
+    g = ImageChops.multiply(g, a)
+    b = ImageChops.multiply(b, a)
+    pre = Image.merge("RGBA", (r, g, b, a))
+    scaled = pre.resize(size, Image.Resampling.LANCZOS)
+    # Clamp premult RGB ≤ alpha (LANCZOS ringing), then un-premultiply.
+    # Outer-edge RGB is also capped to charcoal so ringing can't become a white halo.
+    bg_cap = max(BG_FROM + BG_TO) + 10
+    px_r, px_g, px_b, px_a = scaled.split()
+    pr = ImageChops.darker(px_r, px_a).load()
+    pg = ImageChops.darker(px_g, px_a).load()
+    pb = ImageChops.darker(px_b, px_a).load()
+    pa = px_a.load()
+    w, h = size
+    out = Image.new("RGBA", size)
+    op = out.load()
+    for y in range(h):
+        for x in range(w):
+            alpha = pa[x, y]
+            if alpha < 8:
+                op[x, y] = (0, 0, 0, 0)
+                continue
+            if alpha >= 255:
+                r, g, b = pr[x, y], pg[x, y], pb[x, y]
+            else:
+                r = (pr[x, y] * 255 + alpha // 2) // alpha
+                g = (pg[x, y] * 255 + alpha // 2) // alpha
+                b = (pb[x, y] * 255 + alpha // 2) // alpha
+                # Soft outer rim only (not mint accent AA).
+                if not (g > r + 30 and g > b + 20):
+                    r = min(r, bg_cap)
+                    g = min(g, bg_cap)
+                    b = min(b, bg_cap)
+            op[x, y] = (r, g, b, alpha)
+    return out
+
+
+def draw_icon(canvas: int) -> Image.Image:
+    # Draw large, then LANCZOS down — curves and `>_` stay anti-aliased (no jaggies / hard mask halo).
+    ss = 4
+    return _resize_premultiplied(_render(canvas * ss), (canvas, canvas))
 
 
 def main():
