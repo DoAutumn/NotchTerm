@@ -40,10 +40,9 @@ Standalone `.app` (arm64):
 open dist/NotchTerm.app
 ```
 
-DMG / zip (optional):
+Release zip (optional):
 
 ```bash
-./scripts/build-dmg.sh
 ./scripts/build-zip.sh
 ```
 
