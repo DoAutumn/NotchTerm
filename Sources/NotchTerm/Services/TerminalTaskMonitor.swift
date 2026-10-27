@@ -14,6 +14,8 @@ final class TerminalTaskMonitor: ObservableObject {
     private var refreshPending = false
     private var pendingRefreshWork: DispatchWorkItem?
     private var sessionNameCache: [String: String] = [:]
+    /// Last known good chat title per Cursor conversation (survives `agent --resume`).
+    private var titlesByConversationId: [String: String] = [:]
     private var titleRefreshTask: Task<Void, Never>?
     /// After empty/useless osascript, wait before retrying the same candidates.
     private var titleRefreshCooldownUntil = Date.distantPast
@@ -29,6 +31,8 @@ final class TerminalTaskMonitor: ObservableObject {
     private let titleRefreshFailureCooldown: TimeInterval = 60
     /// iTerm still has a placeholder name — chat title usually appears within a few seconds.
     private let titleRefreshPlaceholderCooldown: TimeInterval = 3
+    /// After resume, ignore the tab's pre-existing name until it changes (or this timeout).
+    private let titleStaleAcceptAfter: TimeInterval = 15
 
     private struct TrackedTask {
         var pid: Int32
@@ -37,6 +41,9 @@ final class TerminalTaskMonitor: ObservableObject {
         var title: String
         var tty: String?
         var conversationId: String?
+        /// iTerm name present when this conversation bound — likely the *previous* chat on that tab.
+        var ignoredSessionTitle: String?
+        var titleGuardStartedAt: Date?
         var workingDirectory: URL?
         var startedAt: Date
         var wasBusy: Bool
@@ -98,13 +105,12 @@ final class TerminalTaskMonitor: ObservableObject {
         }
 
         let generation = refreshGeneration
-        let namesForTitles = sessionNameCache
 
         refreshTask = Task { [weak self] in
             let snapshot = await Task.detached(priority: .utility) {
                 AgentHookService.pruneStaleStateFiles()
                 ShellHookService.pruneStaleStateFiles()
-                return Self.collectFromHooks(sessionNameCache: namesForTitles)
+                return Self.collectFromHooks()
             }.value
 
             guard let self else { return }
@@ -182,7 +188,7 @@ final class TerminalTaskMonitor: ObservableObject {
         refreshPending = true
     }
 
-    /// iTerm titles only for *running* agents that have a tty and still need a real chat name.
+    /// iTerm titles only for *running* agents that still need a confirmed chat name.
     private func scheduleTitleRefreshIfNeeded() {
         guard titleRefreshTask == nil else { return }
 
@@ -190,8 +196,9 @@ final class TerminalTaskMonitor: ObservableObject {
             guard tracked.kind == .agent, tracked.state == .running else { return false }
             guard let tty = tracked.tty, !tty.isEmpty else { return false }
             let needsFallbackTitle = Self.isPlaceholderAgentTitle(tracked.title)
+            let awaitingFreshName = tracked.ignoredSessionTitle != nil
             let missingCache = sessionNameCache[tty] == nil
-            return needsFallbackTitle || missingCache
+            return needsFallbackTitle || awaitingFreshName || missingCache
         }
         guard !candidates.isEmpty else { return }
 
@@ -224,10 +231,10 @@ final class TerminalTaskMonitor: ObservableObject {
             let stillNeed = self.known.values.contains { tracked in
                 guard tracked.kind == .agent, tracked.state == .running else { return false }
                 guard let tty = tracked.tty, !tty.isEmpty else { return false }
-                return Self.isPlaceholderAgentTitle(tracked.title)
+                return Self.isPlaceholderAgentTitle(tracked.title) || tracked.ignoredSessionTitle != nil
             }
             if stillNeed {
-                // Placeholder like "Cursor Agent（Python）" — retry soon; chat title arrives later.
+                // Placeholder / stale tab name — retry soon until iTerm catches up.
                 self.titleRefreshCooldownUntil = Date().addingTimeInterval(self.titleRefreshPlaceholderCooldown)
                 let keysSnapshot = self.titleRefreshLastCandidateKeys
                 DispatchQueue.main.asyncAfter(
@@ -264,14 +271,63 @@ final class TerminalTaskMonitor: ObservableObject {
                 }
                 continue
             }
+
+            let ignored = tracked.ignoredSessionTitle
+            let isStaleBaseline = ignored != nil && cleaned == ignored
+            if isStaleBaseline {
+                let waited = tracked.titleGuardStartedAt.map { Date().timeIntervalSince($0) } ?? 0
+                if waited < titleStaleAcceptAfter {
+                    // Tab still shows the pre-resume name — don't adopt it yet.
+                    continue
+                }
+                // Same-tab resume: name never changed; accept after timeout.
+            }
+            // iTerm moved on from the baseline, or stale timeout elapsed.
+            tracked.ignoredSessionTitle = nil
+            tracked.titleGuardStartedAt = nil
             if tracked.title != cleaned {
                 tracked.title = cleaned
-                known[id] = tracked
-                changed = true
             }
+            rememberAgentTitle(cleaned, conversationId: tracked.conversationId)
+            known[id] = tracked
+            changed = true
         }
         if changed {
             publishTasks()
+        }
+    }
+
+    /// Snapshot the tab name at bind time and prefer a remembered title for this conversation.
+    private func bindAgentTitleGuard(_ tracked: inout TrackedTask) {
+        let baseline: String? = {
+            guard let tty = tracked.tty, let name = sessionNameCache[tty], !name.isEmpty else { return nil }
+            let cleaned = Self.cleanedSessionTitle(name)
+            guard !cleaned.isEmpty, !Self.isPlaceholderAgentTitle(cleaned) else { return nil }
+            return cleaned
+        }()
+        tracked.ignoredSessionTitle = baseline
+        tracked.titleGuardStartedAt = Date()
+        if let conv = tracked.conversationId, !conv.isEmpty,
+           let remembered = titlesByConversationId[conv],
+           !Self.isPlaceholderAgentTitle(remembered) {
+            tracked.title = remembered
+        } else {
+            tracked.title = "Cursor Agent"
+        }
+        titleRefreshCooldownUntil = Date.distantPast
+        titleRefreshLastCandidateKeys = []
+    }
+
+    private func rememberAgentTitle(_ title: String, conversationId: String?) {
+        guard let conversationId, !conversationId.isEmpty else { return }
+        guard !Self.isPlaceholderAgentTitle(title) else { return }
+        titlesByConversationId[conversationId] = title
+        // Soft cap so a long-lived process doesn't grow forever.
+        if titlesByConversationId.count > 80 {
+            let drop = titlesByConversationId.count - 60
+            for key in titlesByConversationId.keys.prefix(drop) {
+                titlesByConversationId.removeValue(forKey: key)
+            }
         }
     }
 
@@ -330,31 +386,22 @@ final class TerminalTaskMonitor: ObservableObject {
         let alive: Bool
     }
 
-    nonisolated private static func collectFromHooks(
-        sessionNameCache: [String: String]
-    ) -> HookSnapshot {
+    nonisolated private static func collectFromHooks() -> HookSnapshot {
         var rows: [HookRow] = []
 
         for (pid, hook) in AgentHookService.loadStatesByPID() {
             let alive = kill(pid, 0) == 0
             let tty = hook.tty.map(ITermController.normalizedTTY)
-            let sessionName = tty.flatMap { sessionNameCache[$0] }
-            let title: String = {
-                if let sessionName, !sessionName.isEmpty {
-                    let cleaned = cleanedSessionTitle(sessionName)
-                    if !cleaned.isEmpty, !isPlaceholderAgentTitle(cleaned) {
-                        return cleaned
-                    }
-                }
-                return "Cursor Agent"
-            }()
+            // Never trust iTerm names at collect time — tab title is often from a
+            // previous chat on `--resume`. Titles are applied on the main actor with
+            // a stale-baseline guard + per-conversation memory.
             rows.append(
                 HookRow(
                     pid: pid,
                     kind: .agent,
                     state: hook.state.rawValue,
                     command: hook.conversationId.map { "agent --resume \($0)" } ?? "agent",
-                    title: title,
+                    title: "Cursor Agent",
                     cwd: hook.cwd,
                     tty: tty,
                     conversationId: hook.conversationId,
@@ -428,6 +475,7 @@ final class TerminalTaskMonitor: ObservableObject {
                 continue
             }
 
+            let isNew = known[id] == nil
             var tracked = known[id] ?? TrackedTask(
                 pid: row.pid,
                 kind: row.kind,
@@ -435,6 +483,8 @@ final class TerminalTaskMonitor: ObservableObject {
                 title: row.title,
                 tty: row.tty,
                 conversationId: row.conversationId,
+                ignoredSessionTitle: nil,
+                titleGuardStartedAt: nil,
                 workingDirectory: row.cwd.map { URL(fileURLWithPath: $0, isDirectory: true) },
                 startedAt: now,
                 wasBusy: false,
@@ -445,32 +495,29 @@ final class TerminalTaskMonitor: ObservableObject {
             tracked.kind = row.kind
             tracked.command = row.command
             tracked.pid = row.pid
+            tracked.tty = row.tty ?? tracked.tty
             if row.kind == .agent {
                 let newConv = row.conversationId
+                var needsTitleGuard = isNew
                 if let newConv, !newConv.isEmpty, newConv != tracked.conversationId {
-                    // New chat on the same agent PID — drop previous conversation's title.
+                    // New / resumed chat (same or new PID) — don't keep the prior title.
                     tracked.conversationId = newConv
-                    tracked.title = "Cursor Agent"
-                    if let tty = row.tty ?? tracked.tty {
-                        sessionNameCache.removeValue(forKey: tty)
-                    }
-                    titleRefreshCooldownUntil = Date.distantPast
-                    titleRefreshLastCandidateKeys = []
+                    needsTitleGuard = true
                 } else if tracked.conversationId == nil {
                     tracked.conversationId = newConv
+                    if isNew { needsTitleGuard = true }
                 }
-
-                let rowPlaceholder = Self.isPlaceholderAgentTitle(row.title)
-                let trackedPlaceholder = Self.isPlaceholderAgentTitle(tracked.title)
-                if !rowPlaceholder {
-                    tracked.title = row.title
-                } else if trackedPlaceholder {
-                    tracked.title = "Cursor Agent"
+                if needsTitleGuard {
+                    bindAgentTitleGuard(&tracked)
+                } else if Self.isPlaceholderAgentTitle(tracked.title),
+                          let conv = tracked.conversationId,
+                          let remembered = titlesByConversationId[conv],
+                          !Self.isPlaceholderAgentTitle(remembered) {
+                    tracked.title = remembered
                 }
             } else {
                 tracked.title = row.title
             }
-            tracked.tty = row.tty ?? tracked.tty
             if let cwd = row.cwd {
                 tracked.workingDirectory = URL(fileURLWithPath: cwd, isDirectory: true)
             }
