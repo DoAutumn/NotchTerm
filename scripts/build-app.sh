@@ -39,7 +39,7 @@ mkdir -p "$CONTENTS_PATH/MacOS" "$CONTENTS_PATH/Resources"
 cp "$BIN_DIR/NotchTerm" "$CONTENTS_PATH/MacOS/NotchTerm"
 # dSYM is only useful for crash symbolication of a kept build product; the
 # shipped .app is in dist/, and Spotlight/search indexes these as noise.
-rm -rf "$BIN_DIR"/*.dSYM
+rm -rf "$BIN_DIR"/*.dSYM(N)
 
 if [ -d "$BIN_DIR/NotchTerm_NotchTerm.bundle" ]; then
     cp -R "$BIN_DIR/NotchTerm_NotchTerm.bundle" "$CONTENTS_PATH/Resources/"
