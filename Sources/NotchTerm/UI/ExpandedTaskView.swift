@@ -91,7 +91,7 @@ private struct ExpandedBody: View {
                 Button {
                     model.focusTaskInITerm(task)
                 } label: {
-                    Label("跳转到 iTerm", systemImage: "arrow.up.forward.app")
+                    Label("跳转到终端", systemImage: "arrow.up.forward.app")
                         .font(.system(size: 11, weight: .semibold))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 8)

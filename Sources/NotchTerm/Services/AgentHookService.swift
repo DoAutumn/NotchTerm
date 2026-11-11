@@ -154,7 +154,7 @@ enum AgentHookService {
                 return true
             }
             if let tty, let hookTTY = hook.tty, !hookTTY.isEmpty,
-               ITermController.normalizedTTY(hookTTY) == ITermController.normalizedTTY(tty)
+               TerminalController.normalizedTTY(hookTTY) == TerminalController.normalizedTTY(tty)
             {
                 return true
             }

@@ -56,6 +56,6 @@ struct TaskCompletionEvent: Identifiable, Equatable, Sendable {
     let title: String
     let subtitle: String
     let kind: TerminalTaskKind
-    /// iTerm tty at completion time (for Jump from the DONE strip).
+    /// Terminal tty at completion time (for Jump from the DONE strip).
     let tty: String?
 }

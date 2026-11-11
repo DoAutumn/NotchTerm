@@ -55,7 +55,7 @@ private struct GeneralSettingsTab: View {
             }
 
             Section("权限") {
-                Text("请授予 iTerm 的自动化权限，以便读取标签名并「跳转到 iTerm」。")
+                Text("请授予 iTerm / Ghostty 的自动化权限，以便读取标签名并「跳转到终端」。")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                 Button("打开自动化设置") {

@@ -1,6 +1,6 @@
 import Foundation
 
-/// zsh preexec/precmd pushes git/npm long-task state (iTerm only).
+/// zsh preexec/precmd pushes git/npm long-task state (iTerm / Ghostty).
 enum ShellHookService {
     nonisolated static var stateDirectory: URL {
         let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first

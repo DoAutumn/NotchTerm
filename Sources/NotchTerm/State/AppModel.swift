@@ -323,32 +323,36 @@ final class AppModel: ObservableObject {
     }
 
     func focusTaskInITerm(_ task: TerminalTask) {
-        focusTTYInITerm(task.tty)
+        focusTTYInTerminal(task.tty)
     }
 
     /// Jump from the compact DONE strip (within the ~4.5s banner window).
     func focusCompletionInITerm(_ event: TaskCompletionEvent) {
-        focusTTYInITerm(event.tty)
+        focusTTYInTerminal(event.tty)
         monitor.clearCompletionBanner()
         syncNotchPresentation()
     }
 
-    private func focusTTYInITerm(_ tty: String?) {
+    private func focusTTYInTerminal(_ tty: String?) {
+        guard TerminalController.anySupportedTerminalRunning() else {
+            showMessage("终端未运行")
+            return
+        }
         guard let tty else {
-            showMessage("该任务没有可用的 iTerm TTY")
+            showMessage("该任务没有可用的终端 TTY")
             return
         }
         // ShellCommand blocks; never run it on the main actor.
         Task { [weak self] in
             let ok = await Task.detached(priority: .userInitiated) {
-                ITermController.activateSession(tty: tty)
+                TerminalController.activateSession(tty: tty)
             }.value
             await MainActor.run {
                 guard let self else { return }
                 if ok {
-                    self.showMessage("已切换到 iTerm")
+                    self.showMessage("已切换到终端")
                 } else {
-                    self.showMessage("无法聚焦 iTerm（请检查自动化权限）")
+                    self.showMessage("无法聚焦终端（请检查自动化权限）")
                     if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation") {
                         NSWorkspace.shared.open(url)
                     }

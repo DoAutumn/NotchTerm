@@ -72,7 +72,7 @@ private struct CompactBody: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .help("跳转到 iTerm")
+                .help("跳转到终端")
             } else if let task = displayTask {
                 titleChip(title: task.title, dot: dotColor(for: task.state))
 

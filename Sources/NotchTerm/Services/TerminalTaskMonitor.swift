@@ -1,3 +1,4 @@
+import AppKit
 import Darwin
 import Foundation
 
@@ -29,10 +30,13 @@ final class TerminalTaskMonitor: ObservableObject {
     private let hookFollowUpInterval: TimeInterval = 0.2
     /// osascript empty / Automation denied.
     private let titleRefreshFailureCooldown: TimeInterval = 60
-    /// iTerm still has a placeholder name — chat title usually appears within a few seconds.
+    /// Terminal still has a placeholder name — chat title usually appears within a few seconds.
     private let titleRefreshPlaceholderCooldown: TimeInterval = 3
     /// After resume, ignore the tab's pre-existing name until it changes (or this timeout).
     private let titleStaleAcceptAfter: TimeInterval = 15
+
+    private var workspaceObservers: [NSObjectProtocol] = []
+    private var terminalsWereRunning = false
 
     private struct TrackedTask {
         var pid: Int32
@@ -64,12 +68,14 @@ final class TerminalTaskMonitor: ObservableObject {
         pause()
         startDirectoryWatchers()
         startAliveCheckTimer()
+        startTerminalPresenceObserver()
         refresh(force: true)
     }
 
     func pause() {
         aliveCheckTimer?.invalidate()
         aliveCheckTimer = nil
+        stopTerminalPresenceObserver()
         pendingRefreshWork?.cancel()
         pendingRefreshWork = nil
         refreshTask?.cancel()
@@ -104,6 +110,14 @@ final class TerminalTaskMonitor: ObservableObject {
             return
         }
 
+        // Quit terminals must stay quit: no osascript, and no leftover notch tasks.
+        let running = TerminalController.anySupportedTerminalRunning()
+        terminalsWereRunning = running
+        if !running {
+            clearTasksBecauseTerminalsGone()
+            return
+        }
+
         let generation = refreshGeneration
 
         refreshTask = Task { [weak self] in
@@ -116,6 +130,13 @@ final class TerminalTaskMonitor: ObservableObject {
             guard let self else { return }
             guard generation == self.refreshGeneration else { return }
             if Task.isCancelled {
+                self.finishRefresh(runAgain: false, generation: generation)
+                return
+            }
+            // Terminal may have quit while we were collecting.
+            if !TerminalController.anySupportedTerminalRunning() {
+                self.terminalsWereRunning = false
+                self.clearTasksBecauseTerminalsGone()
                 self.finishRefresh(runAgain: false, generation: generation)
                 return
             }
@@ -134,6 +155,90 @@ final class TerminalTaskMonitor: ObservableObject {
         }
         timer.tolerance = 5
         aliveCheckTimer = timer
+    }
+
+    private func startTerminalPresenceObserver() {
+        stopTerminalPresenceObserver()
+        terminalsWereRunning = TerminalController.anySupportedTerminalRunning()
+
+        let center = NSWorkspace.shared.notificationCenter
+        let supported = Set(TerminalController.App.allCases.map(\.bundleIdentifier))
+
+        let launch = center.addObserver(
+            forName: NSWorkspace.didLaunchApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            guard let bid = Self.bundleID(from: note), supported.contains(bid) else { return }
+            // queue: .main → already on the main actor; avoid an extra Task hop.
+            MainActor.assumeIsolated {
+                self?.checkTerminalPresence()
+            }
+        }
+
+        let terminate = center.addObserver(
+            forName: NSWorkspace.didTerminateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            guard let bid = Self.bundleID(from: note), supported.contains(bid) else { return }
+            if let app = TerminalController.App.from(bundleIdentifier: bid) {
+                TerminalController.forget(app: app)
+            }
+            MainActor.assumeIsolated {
+                self?.checkTerminalPresence()
+            }
+        }
+
+        workspaceObservers = [launch, terminate]
+    }
+
+    private func stopTerminalPresenceObserver() {
+        let center = NSWorkspace.shared.notificationCenter
+        for observer in workspaceObservers {
+            center.removeObserver(observer)
+        }
+        workspaceObservers = []
+    }
+
+    private nonisolated static func bundleID(from note: Notification) -> String? {
+        (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?
+            .bundleIdentifier
+    }
+
+    private func checkTerminalPresence() {
+        let running = TerminalController.anySupportedTerminalRunning()
+        defer { terminalsWereRunning = running }
+        if !running {
+            if terminalsWereRunning || !known.isEmpty || !tasks.isEmpty || lastCompletion != nil {
+                clearTasksBecauseTerminalsGone()
+            }
+            return
+        }
+        if !terminalsWereRunning {
+            // Terminal just came back — rebuild from hooks.
+            refresh(force: true)
+        }
+    }
+
+    /// Drop notch tasks/banners when iTerm and Ghostty are both gone.
+    private func clearTasksBecauseTerminalsGone() {
+        let hadTitleRefresh = titleRefreshTask != nil
+            || titleRefreshCooldownUntil != Date.distantPast
+            || !titleRefreshLastCandidateKeys.isEmpty
+        let hadState = !known.isEmpty || !sessionNameCache.isEmpty || !tasks.isEmpty || lastCompletion != nil
+        guard hadTitleRefresh || hadState else { return }
+
+        titleRefreshTask?.cancel()
+        titleRefreshTask = nil
+        titleRefreshCooldownUntil = Date.distantPast
+        titleRefreshLastCandidateKeys = []
+        sessionNameCache = [:]
+        known = [:]
+        if !tasks.isEmpty {
+            tasks = []
+        }
+        clearCompletionBanner()
     }
 
     private func startDirectoryWatchers() {
@@ -188,9 +293,10 @@ final class TerminalTaskMonitor: ObservableObject {
         refreshPending = true
     }
 
-    /// iTerm titles only for *running* agents that still need a confirmed chat name.
+    /// Terminal tab titles only for *running* agents that still need a confirmed chat name.
     private func scheduleTitleRefreshIfNeeded() {
         guard titleRefreshTask == nil else { return }
+        guard TerminalController.anySupportedTerminalRunning() else { return }
 
         let candidates = known.values.filter { tracked in
             guard tracked.kind == .agent, tracked.state == .running else { return false }
@@ -211,14 +317,20 @@ final class TerminalTaskMonitor: ObservableObject {
 
         titleRefreshTask = Task { [weak self] in
             let names = await Task.detached(priority: .utility) {
-                Self.uniqueTTYNames(ITermController.listSessionSummaries())
+                guard TerminalController.anySupportedTerminalRunning() else { return [String: String]() }
+                return Self.uniqueTTYNames(TerminalController.listSessionSummaries())
             }.value
             guard let self else { return }
             defer { self.titleRefreshTask = nil }
             guard !Task.isCancelled else { return }
 
+            if !TerminalController.anySupportedTerminalRunning() {
+                self.clearTasksBecauseTerminalsGone()
+                return
+            }
+
             if names.isEmpty {
-                // iTerm down / Automation denied — don't hammer osascript.
+                // Automation denied / no sessions — don't hammer osascript.
                 self.titleRefreshCooldownUntil = Date().addingTimeInterval(self.titleRefreshFailureCooldown)
                 return
             }
@@ -234,7 +346,7 @@ final class TerminalTaskMonitor: ObservableObject {
                 return Self.isPlaceholderAgentTitle(tracked.title) || tracked.ignoredSessionTitle != nil
             }
             if stillNeed {
-                // Placeholder / stale tab name — retry soon until iTerm catches up.
+                // Placeholder / stale tab name — retry soon until the title catches up.
                 self.titleRefreshCooldownUntil = Date().addingTimeInterval(self.titleRefreshPlaceholderCooldown)
                 let keysSnapshot = self.titleRefreshLastCandidateKeys
                 DispatchQueue.main.asyncAfter(
@@ -331,7 +443,7 @@ final class TerminalTaskMonitor: ObservableObject {
         }
     }
 
-    nonisolated private static func uniqueTTYNames(_ sessions: [ITermSession]) -> [String: String] {
+    nonisolated private static func uniqueTTYNames(_ sessions: [TerminalSession]) -> [String: String] {
         var names: [String: String] = [:]
         for session in sessions where !session.tty.isEmpty {
             names[session.tty] = session.name
@@ -339,7 +451,7 @@ final class TerminalTaskMonitor: ObservableObject {
         return names
     }
 
-    /// Strip iTerm's trailing " (agent)" job marker.
+    /// Strip trailing " (agent)" job marker from tab titles.
     nonisolated private static func cleanedSessionTitle(_ sessionName: String) -> String {
         sessionName
             .replacingOccurrences(
@@ -391,8 +503,8 @@ final class TerminalTaskMonitor: ObservableObject {
 
         for (pid, hook) in AgentHookService.loadStatesByPID() {
             let alive = kill(pid, 0) == 0
-            let tty = hook.tty.map(ITermController.normalizedTTY)
-            // Never trust iTerm names at collect time — tab title is often from a
+            let tty = hook.tty.map(TerminalController.normalizedTTY)
+            // Never trust terminal tab names at collect time — title is often from a
             // previous chat on `--resume`. Titles are applied on the main actor with
             // a stale-baseline guard + per-conversation memory.
             rows.append(
@@ -412,7 +524,7 @@ final class TerminalTaskMonitor: ObservableObject {
 
         for (pid, task) in ShellHookService.loadStatesByPID() {
             let alive = kill(pid, 0) == 0
-            let tty = task.tty.map(ITermController.normalizedTTY)
+            let tty = task.tty.map(TerminalController.normalizedTTY)
             rows.append(
                 HookRow(
                     pid: pid,

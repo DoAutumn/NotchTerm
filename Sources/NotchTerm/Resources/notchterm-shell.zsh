@@ -1,11 +1,14 @@
-# NotchTerm zsh integration — notify long git / package tasks (iTerm only).
+# NotchTerm zsh integration — notify long git / package tasks (iTerm / Ghostty).
 # Sourced from ~/.zshrc. Idempotent.
 [[ -n "${_NOTCHTERM_SHELL_LOADED:-}" ]] && return
 _NOTCHTERM_SHELL_LOADED=1
 
-# Interactive iTerm sessions only.
+# Interactive iTerm / Ghostty sessions only.
 [[ -o interactive ]] || return 0
-[[ "${TERM_PROGRAM:-}" == "iTerm.app" ]] || return 0
+case "${TERM_PROGRAM:-}" in
+  iTerm.app|ghostty) ;;
+  *) return 0 ;;
+esac
 
 typeset -g _NOTCHTERM_TRACKING=0
 typeset -g _NOTCHTERM_KIND=""

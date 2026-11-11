@@ -109,7 +109,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             statusMenu.addItem(expand)
 
             let focus = NSMenuItem(
-                title: "跳转到 iTerm",
+                title: "跳转到终端",
                 action: #selector(focusSelectedTask),
                 keyEquivalent: ""
             )
