@@ -79,3 +79,4 @@ python3 -c "import json; h=json.load(open('$HOME/.cursor/hooks.json')); print(so
 - `hooks.json` 是**用户级全局配置**，PromptQy / 其它工具也可能往里写；NotchTerm 用 `_notchterm` 标记自己的条目，合并时不会整文件覆盖。
 - 重装 Cursor **不会**删掉 `Application Support` 里的 agent-state；一般可留着。
 - 企业/团队级 hooks 若另有配置，以 Cursor 文档的优先级为准；用户级 `~/.cursor/hooks.json` 仍需存在对应事件名，CLI 才容易触发。
+- 启动时会去掉 `"_otty": true` 的遗留钩子。Cursor 目前没有「等待确认 / 有提问」专用 hook（见 [CLAUDE-HOOKS.md](CLAUDE-HOOKS.md)）。

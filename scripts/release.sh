@@ -82,7 +82,7 @@ cask "$CASK_TOKEN" do
 
   url "https://github.com/$GH_REPO/releases/download/v#{version}/NotchTerm-#{version}.zip"
   name "NotchTerm"
-  desc "Cursor Agent and long git/npm tasks in the Mac notch — hook-driven, no process scans"
+  desc "Cursor Agent, Claude Code, and long git/npm tasks in the Mac notch — hook-driven, no process scans"
   homepage "https://github.com/$GH_REPO"
 
   livecheck do

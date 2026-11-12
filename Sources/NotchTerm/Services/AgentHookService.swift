@@ -1,7 +1,8 @@
+import Darwin
 import Foundation
 
 /// Cursor Agent CLI pushes busy/idle via `~/.cursor/hooks.json`.
-/// This is the **primary** signal for NotchTerm agent state.
+/// Claude Code writes the same `agent-state` shape via `ClaudeHookService`.
 enum AgentHookService {
     nonisolated static var stateDirectory: URL {
         let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
@@ -28,6 +29,21 @@ enum AgentHookService {
         enum Value: String, Sendable {
             case running
             case idle
+            case awaitingPermission = "awaiting_permission"
+            case awaitingQuestion = "awaiting_question"
+
+            var taskState: TerminalTaskState {
+                switch self {
+                case .running: return .running
+                case .idle: return .idle
+                case .awaitingPermission: return .awaitingPermission
+                case .awaitingQuestion: return .awaitingQuestion
+                }
+            }
+
+            var isBusy: Bool {
+                self != .idle
+            }
         }
 
         let pid: Int32
@@ -36,6 +52,8 @@ enum AgentHookService {
         let conversationId: String?
         let cwd: String?
         let tty: String?
+        let provider: AgentProvider
+        let sessionTitle: String?
     }
 
     /// Last successful hook write age, for diagnostics.
@@ -86,20 +104,30 @@ enum AgentHookService {
                 continue
             }
 
-            // Drop stale pushes (crashed mid-turn, etc.) so the directory cannot grow forever.
-            guard now.timeIntervalSince(updatedAt) < 6 * 60 * 60 else {
-                try? FileManager.default.removeItem(at: url)
-                continue
+            let pid = Int32(pidValue)
+            // Drop stale pushes only when the agent PID is gone. Awaiting permission /
+            // question can sit for hours with no further hooks, so age-only prune would
+            // clear「等待确认」/「有提问」and emit a false DONE while claude is still alive.
+            if now.timeIntervalSince(updatedAt) >= 6 * 60 * 60 {
+                if kill(pid, 0) != 0 {
+                    try? FileManager.default.removeItem(at: url)
+                    continue
+                }
             }
 
-            let pid = Int32(pidValue)
+            let providerRaw = (json["provider"] as? String)?.lowercased()
+            let provider = providerRaw.flatMap(AgentProvider.init(rawValue:)) ?? .cursor
+            let sessionTitle = (json["sessionTitle"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
             let hook = HookState(
                 pid: pid,
                 state: state,
                 updatedAt: updatedAt,
                 conversationId: json["conversationId"] as? String,
                 cwd: json["cwd"] as? String,
-                tty: json["tty"] as? String
+                tty: json["tty"] as? String,
+                provider: provider,
+                sessionTitle: (sessionTitle?.isEmpty == false) ? sessionTitle : nil
             )
             if let existing = result[pid], existing.updatedAt > hook.updatedAt {
                 continue
@@ -122,9 +150,16 @@ enum AgentHookService {
         for url in files where url.pathExtension == "json" {
             let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))
                 .flatMap(\.contentModificationDate) ?? .distantPast
-            if now.timeIntervalSince(mtime) >= 6 * 60 * 60 {
-                try? FileManager.default.removeItem(at: url)
+            guard now.timeIntervalSince(mtime) >= 6 * 60 * 60 else { continue }
+            // Keep files whose agent PID is still alive (long awaits / quiet turns).
+            if let data = try? Data(contentsOf: url),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let pidValue = json["pid"] as? Int ?? (json["pid"] as? Double).map(Int.init),
+               kill(Int32(pidValue), 0) == 0
+            {
+                continue
             }
+            try? FileManager.default.removeItem(at: url)
         }
         // Cap hook.log growth.
         let log = dir.appendingPathComponent("hook.log")
@@ -209,8 +244,8 @@ enum AgentHookService {
         }
 
         var hooks = (root["hooks"] as? [String: Any]) ?? [:]
-        // Drop dead Otty hooks (app uninstalled) so they don't confuse debugging.
-        hooks = stripBrokenOttyHooks(hooks)
+        // Otty is uninstalled — drop leftover hooks so they don't fail or confuse debugging.
+        hooks = stripOttyHooks(hooks)
 
         let scriptPath = installedHookScriptURL.path
         let runningCmd = "'\(scriptPath)' running"
@@ -241,28 +276,15 @@ enum AgentHookService {
         return entries
     }
 
-    private static func stripBrokenOttyHooks(_ hooks: [String: Any]) -> [String: Any] {
+    /// Remove every Otty-tagged hook entry (app is uninstalled).
+    private static func stripOttyHooks(_ hooks: [String: Any]) -> [String: Any] {
         var result: [String: Any] = [:]
         for (key, value) in hooks {
             guard let entries = value as? [[String: Any]] else {
                 result[key] = value
                 continue
             }
-            let kept = entries.filter { entry in
-                guard (entry["_otty"] as? Bool) == true else { return true }
-                let command = entry["command"] as? String ?? ""
-                // Keep only if the otty-hook.sh path still exists.
-                if let range = command.range(of: "'/"),
-                   let end = command[range.upperBound...].firstIndex(of: "'")
-                {
-                    let path = String(command[range.upperBound..<end])
-                    if path.contains("otty-hook.sh") {
-                        return FileManager.default.isExecutableFile(atPath: path)
-                    }
-                }
-                return false
-            }
-            result[key] = kept
+            result[key] = entries.filter { ($0["_otty"] as? Bool) != true }
         }
         return result
     }

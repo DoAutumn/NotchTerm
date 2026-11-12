@@ -2,11 +2,13 @@ import AppKit
 import Darwin
 import Foundation
 
-/// Hook-driven tasks only (Cursor agent-state + zsh task-state). No `ps` / `lsof` scans.
+/// Hook-driven tasks only (Cursor/Claude agent-state + zsh task-state). No `ps` / `lsof` scans.
 @MainActor
 final class TerminalTaskMonitor: ObservableObject {
     @Published private(set) var tasks: [TerminalTask] = []
     @Published private(set) var lastCompletion: TaskCompletionEvent?
+    /// Frontmost iTerm/Ghostty tty (normalized). Used to prefer that session's title in the notch.
+    @Published private(set) var frontmostTTY: String?
 
     private var known: [String: TrackedTask] = [:]
     private var completionClearWork: DispatchWorkItem?
@@ -15,7 +17,7 @@ final class TerminalTaskMonitor: ObservableObject {
     private var refreshPending = false
     private var pendingRefreshWork: DispatchWorkItem?
     private var sessionNameCache: [String: String] = [:]
-    /// Last known good chat title per Cursor conversation (survives `agent --resume`).
+    /// Last known good chat title per conversation / session (survives resume).
     private var titlesByConversationId: [String: String] = [:]
     private var titleRefreshTask: Task<Void, Never>?
     /// After empty/useless osascript, wait before retrying the same candidates.
@@ -23,8 +25,13 @@ final class TerminalTaskMonitor: ObservableObject {
     private var titleRefreshLastCandidateKeys: Set<String> = []
     private var watchers: [DirectoryWatcher] = []
     private var aliveCheckTimer: Timer?
+    private var frontmostPollTimer: Timer?
+    /// Skip overlapping AppleScript probes when a poll is still in flight.
+    private var frontmostProbeTask: Task<Void, Never>?
 
     private let aliveCheckInterval: TimeInterval = 45
+    /// Poll focused tab so switching Cursor ↔ Claude updates the compact title.
+    private let frontmostPollInterval: TimeInterval = 1.5
     /// Coalesce hook FS bursts (agent can write many times per turn).
     private let hookDebounceInterval: TimeInterval = 0.5
     private let hookFollowUpInterval: TimeInterval = 0.2
@@ -41,6 +48,7 @@ final class TerminalTaskMonitor: ObservableObject {
     private struct TrackedTask {
         var pid: Int32
         var kind: TerminalTaskKind
+        var provider: AgentProvider?
         var command: String
         var title: String
         var tty: String?
@@ -68,13 +76,19 @@ final class TerminalTaskMonitor: ObservableObject {
         pause()
         startDirectoryWatchers()
         startAliveCheckTimer()
+        startFrontmostPollTimer()
         startTerminalPresenceObserver()
         refresh(force: true)
+        refreshFrontmostTTY()
     }
 
     func pause() {
         aliveCheckTimer?.invalidate()
         aliveCheckTimer = nil
+        frontmostPollTimer?.invalidate()
+        frontmostPollTimer = nil
+        frontmostProbeTask?.cancel()
+        frontmostProbeTask = nil
         stopTerminalPresenceObserver()
         pendingRefreshWork?.cancel()
         pendingRefreshWork = nil
@@ -155,6 +169,48 @@ final class TerminalTaskMonitor: ObservableObject {
         }
         timer.tolerance = 5
         aliveCheckTimer = timer
+    }
+
+    private func startFrontmostPollTimer() {
+        frontmostPollTimer?.invalidate()
+        let timer = Timer.scheduledTimer(withTimeInterval: frontmostPollInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.refreshFrontmostTTY() }
+        }
+        timer.tolerance = 0.4
+        frontmostPollTimer = timer
+    }
+
+    private func refreshFrontmostTTY() {
+        guard TerminalController.anySupportedTerminalRunning() else {
+            if frontmostTTY != nil { frontmostTTY = nil }
+            return
+        }
+        // Only poll while something is in the notch — stop AppleScript when idle.
+        let activeCount = known.values.filter { $0.state.isActiveInNotch }.count
+        guard activeCount >= 1 else {
+            if frontmostTTY != nil { frontmostTTY = nil }
+            return
+        }
+        // Don't stack osascript if the previous probe is still running.
+        guard frontmostProbeTask == nil else { return }
+
+        frontmostProbeTask = Task { [weak self] in
+            let tty = await Task.detached(priority: .utility) {
+                TerminalController.frontmostTTY()
+            }.value
+            guard let self else { return }
+            self.frontmostProbeTask = nil
+            guard !Task.isCancelled else { return }
+            // nil = frontmost is not a terminal; keep last known so Cursor/IDE focus
+            // doesn't reshuffle the compact title to a wrong session.
+            guard let tty else { return }
+            let normalized = TerminalController.normalizedTTY(tty)
+            if self.frontmostTTY != normalized {
+                self.frontmostTTY = normalized
+                // Re-sort / re-pick compact title without re-reading hook files.
+                self.publishTasks()
+            }
+        }
     }
 
     private func startTerminalPresenceObserver() {
@@ -293,13 +349,13 @@ final class TerminalTaskMonitor: ObservableObject {
         refreshPending = true
     }
 
-    /// Terminal tab titles only for *running* agents that still need a confirmed chat name.
+    /// Terminal tab titles for active agents that still need a confirmed chat name.
     private func scheduleTitleRefreshIfNeeded() {
         guard titleRefreshTask == nil else { return }
         guard TerminalController.anySupportedTerminalRunning() else { return }
 
         let candidates = known.values.filter { tracked in
-            guard tracked.kind == .agent, tracked.state == .running else { return false }
+            guard tracked.kind == .agent, tracked.state.isActiveInNotch else { return false }
             guard let tty = tracked.tty, !tty.isEmpty else { return false }
             let needsFallbackTitle = Self.isPlaceholderAgentTitle(tracked.title)
             let awaitingFreshName = tracked.ignoredSessionTitle != nil
@@ -341,7 +397,7 @@ final class TerminalTaskMonitor: ObservableObject {
             self.applyTitlesFromCache()
 
             let stillNeed = self.known.values.contains { tracked in
-                guard tracked.kind == .agent, tracked.state == .running else { return false }
+                guard tracked.kind == .agent, tracked.state.isActiveInNotch else { return false }
                 guard let tty = tracked.tty, !tty.isEmpty else { return false }
                 return Self.isPlaceholderAgentTitle(tracked.title) || tracked.ignoredSessionTitle != nil
             }
@@ -376,8 +432,9 @@ final class TerminalTaskMonitor: ObservableObject {
             guard !cleaned.isEmpty else { continue }
             if Self.isPlaceholderAgentTitle(cleaned) {
                 // Don't lock onto job leftovers ("Cursor Agent（Python）"); keep refreshing.
-                if Self.isPlaceholderAgentTitle(tracked.title), tracked.title != "Cursor Agent" {
-                    tracked.title = "Cursor Agent"
+                let fallback = tracked.provider?.defaultTitle ?? AgentProvider.cursor.defaultTitle
+                if Self.isPlaceholderAgentTitle(tracked.title), tracked.title != fallback {
+                    tracked.title = fallback
                     known[id] = tracked
                     changed = true
                 }
@@ -409,8 +466,8 @@ final class TerminalTaskMonitor: ObservableObject {
         }
     }
 
-    /// Snapshot the tab name at bind time and prefer a remembered title for this conversation.
-    private func bindAgentTitleGuard(_ tracked: inout TrackedTask) {
+    /// Snapshot the tab name at bind time and prefer session / remembered title for this conversation.
+    private func bindAgentTitleGuard(_ tracked: inout TrackedTask, sessionTitle: String?) {
         let baseline: String? = {
             guard let tty = tracked.tty, let name = sessionNameCache[tty], !name.isEmpty else { return nil }
             let cleaned = Self.cleanedSessionTitle(name)
@@ -419,12 +476,18 @@ final class TerminalTaskMonitor: ObservableObject {
         }()
         tracked.ignoredSessionTitle = baseline
         tracked.titleGuardStartedAt = Date()
-        if let conv = tracked.conversationId, !conv.isEmpty,
-           let remembered = titlesByConversationId[conv],
-           !Self.isPlaceholderAgentTitle(remembered) {
+        let fallback = tracked.provider?.defaultTitle ?? AgentProvider.cursor.defaultTitle
+        if let sessionTitle, !sessionTitle.isEmpty, !Self.isPlaceholderAgentTitle(sessionTitle) {
+            tracked.title = sessionTitle
+            rememberAgentTitle(sessionTitle, conversationId: tracked.conversationId)
+            tracked.ignoredSessionTitle = nil
+            tracked.titleGuardStartedAt = nil
+        } else if let conv = tracked.conversationId, !conv.isEmpty,
+                  let remembered = titlesByConversationId[conv],
+                  !Self.isPlaceholderAgentTitle(remembered) {
             tracked.title = remembered
         } else {
-            tracked.title = "Cursor Agent"
+            tracked.title = fallback
         }
         titleRefreshCooldownUntil = Date.distantPast
         titleRefreshLastCandidateKeys = []
@@ -451,7 +514,7 @@ final class TerminalTaskMonitor: ObservableObject {
         return names
     }
 
-    /// Strip trailing " (agent)" job marker from tab titles.
+    /// Strip job markers / decorative glyphs from terminal titles.
     nonisolated private static func cleanedSessionTitle(_ sessionName: String) -> String {
         sessionName
             .replacingOccurrences(
@@ -459,14 +522,23 @@ final class TerminalTaskMonitor: ObservableObject {
                 with: "",
                 options: [.regularExpression, .caseInsensitive]
             )
+            // Ghostty often prefixes with ✳ / ● / emoji.
+            .replacingOccurrences(
+                of: #"^[✳✱*●•◆◇★☆➤›>]+\s*"#,
+                with: "",
+                options: .regularExpression
+            )
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// New chats often show "Cursor Agent（Python）" / bare job names before the real title exists.
+    /// "Claude Code" is a normal Ghostty surface title — keep it (do not treat as placeholder).
     nonisolated private static func isPlaceholderAgentTitle(_ title: String) -> Bool {
         let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
         if t.isEmpty { return true }
         if t.caseInsensitiveCompare("Cursor Agent") == .orderedSame { return true }
+        // Bare "Claude" is our own fallback label, not a real chat title yet.
+        if t.caseInsensitiveCompare("Claude") == .orderedSame { return true }
         if t.caseInsensitiveCompare("agent") == .orderedSame { return true }
         if t.range(
             of: #"^Cursor Agent\s*[（(][^）)]*[）)]$"#,
@@ -489,12 +561,14 @@ final class TerminalTaskMonitor: ObservableObject {
     private struct HookRow: Sendable {
         let pid: Int32
         let kind: TerminalTaskKind
+        let provider: AgentProvider?
         let state: String
         let command: String
         let title: String
         let cwd: String?
         let tty: String?
         let conversationId: String?
+        let sessionTitle: String?
         let alive: Bool
     }
 
@@ -504,6 +578,13 @@ final class TerminalTaskMonitor: ObservableObject {
         for (pid, hook) in AgentHookService.loadStatesByPID() {
             let alive = kill(pid, 0) == 0
             let tty = hook.tty.map(TerminalController.normalizedTTY)
+            let command: String
+            switch hook.provider {
+            case .claude:
+                command = hook.conversationId.map { "claude --resume \($0)" } ?? "claude"
+            case .cursor:
+                command = hook.conversationId.map { "agent --resume \($0)" } ?? "agent"
+            }
             // Never trust terminal tab names at collect time — title is often from a
             // previous chat on `--resume`. Titles are applied on the main actor with
             // a stale-baseline guard + per-conversation memory.
@@ -511,12 +592,14 @@ final class TerminalTaskMonitor: ObservableObject {
                 HookRow(
                     pid: pid,
                     kind: .agent,
+                    provider: hook.provider,
                     state: hook.state.rawValue,
-                    command: hook.conversationId.map { "agent --resume \($0)" } ?? "agent",
-                    title: "Cursor Agent",
+                    command: command,
+                    title: hook.provider.defaultTitle,
                     cwd: hook.cwd,
                     tty: tty,
                     conversationId: hook.conversationId,
+                    sessionTitle: hook.sessionTitle,
                     alive: alive
                 )
             )
@@ -529,12 +612,14 @@ final class TerminalTaskMonitor: ObservableObject {
                 HookRow(
                     pid: pid,
                     kind: task.kind,
+                    provider: nil,
                     state: task.state.rawValue,
                     command: task.command,
                     title: task.title.isEmpty ? task.kind.title : task.title,
                     cwd: task.cwd,
                     tty: tty,
                     conversationId: nil,
+                    sessionTitle: nil,
                     alive: alive
                 )
             )
@@ -552,7 +637,10 @@ final class TerminalTaskMonitor: ObservableObject {
 
         for row in snapshot.rows {
             let id = "\(row.kind.rawValue)-\(row.pid)"
-            let isBusy = row.state == "running"
+            let parsedState = TerminalTaskState(rawValue: row.state)
+            let isBusy = row.kind == .agent
+                ? (parsedState?.isActiveInNotch == true)
+                : row.state == "running"
 
             if !row.alive {
                 if let previous = known[id], previous.wasBusy {
@@ -591,6 +679,7 @@ final class TerminalTaskMonitor: ObservableObject {
             var tracked = known[id] ?? TrackedTask(
                 pid: row.pid,
                 kind: row.kind,
+                provider: row.provider,
                 command: row.command,
                 title: row.title,
                 tty: row.tty,
@@ -605,6 +694,7 @@ final class TerminalTaskMonitor: ObservableObject {
             )
 
             tracked.kind = row.kind
+            tracked.provider = row.provider ?? tracked.provider
             tracked.command = row.command
             tracked.pid = row.pid
             tracked.tty = row.tty ?? tracked.tty
@@ -620,7 +710,13 @@ final class TerminalTaskMonitor: ObservableObject {
                     if isNew { needsTitleGuard = true }
                 }
                 if needsTitleGuard {
-                    bindAgentTitleGuard(&tracked)
+                    bindAgentTitleGuard(&tracked, sessionTitle: row.sessionTitle)
+                } else if let sessionTitle = row.sessionTitle,
+                          !sessionTitle.isEmpty,
+                          !Self.isPlaceholderAgentTitle(sessionTitle),
+                          tracked.title != sessionTitle {
+                    tracked.title = sessionTitle
+                    rememberAgentTitle(sessionTitle, conversationId: tracked.conversationId)
                 } else if Self.isPlaceholderAgentTitle(tracked.title),
                           let conv = tracked.conversationId,
                           let remembered = titlesByConversationId[conv],
@@ -635,11 +731,12 @@ final class TerminalTaskMonitor: ObservableObject {
             }
 
             if isBusy {
-                if tracked.state != .running {
+                let nextState = parsedState ?? .running
+                if !tracked.state.isActiveInNotch {
                     tracked.startedAt = now
                 }
                 tracked.wasBusy = true
-                tracked.state = .running
+                tracked.state = nextState
                 tracked.completionEmitted = false
                 nextKnown[id] = tracked
             } else {
@@ -665,7 +762,7 @@ final class TerminalTaskMonitor: ObservableObject {
 
         for (id, previous) in known where nextKnown[id] == nil {
             // Still present as idle git/npm file handled above; true drop = process gone / pruned.
-            if previous.wasBusy, previous.kind == .agent || previous.state == .running {
+            if previous.wasBusy, previous.kind == .agent || previous.state.isActiveInNotch {
                 let already = completions.contains { $0.taskID == id }
                 if !already {
                     completions.append(
@@ -692,23 +789,43 @@ final class TerminalTaskMonitor: ObservableObject {
 
     private func publishTasks() {
         let next = known.values
-            .filter { $0.state == .running }
+            .filter { $0.state.isActiveInNotch }
             .map { tracked -> TerminalTask in
-                TerminalTask(
+                let elapsed = Self.formatElapsed(since: tracked.startedAt)
+                let subtitle: String
+                switch tracked.state {
+                case .awaitingQuestion:
+                    subtitle = "有提问 · \(elapsed)"
+                case .awaitingPermission:
+                    subtitle = "等待确认 · \(elapsed)"
+                default:
+                    subtitle = "Running · \(elapsed)"
+                }
+                return TerminalTask(
                     id: "\(tracked.kind.rawValue)-\(tracked.pid)",
                     pid: tracked.pid,
                     kind: tracked.kind,
                     title: tracked.title,
-                    subtitle: "Running · \(Self.formatElapsed(since: tracked.startedAt))",
+                    subtitle: subtitle,
                     command: tracked.command,
                     tty: tracked.tty,
                     workingDirectory: tracked.workingDirectory,
                     state: tracked.state,
-                    elapsed: Self.formatElapsed(since: tracked.startedAt),
-                    startedAt: tracked.startedAt
+                    elapsed: elapsed,
+                    startedAt: tracked.startedAt,
+                    provider: tracked.provider
                 )
             }
             .sorted { lhs, rhs in
+                if lhs.state.attentionRank != rhs.state.attentionRank {
+                    return lhs.state.attentionRank < rhs.state.attentionRank
+                }
+                // Prefer the frontmost terminal's task so switching tabs updates the title.
+                if let front = frontmostTTY, !front.isEmpty {
+                    let lFront = lhs.tty.map(TerminalController.normalizedTTY) == front
+                    let rFront = rhs.tty.map(TerminalController.normalizedTTY) == front
+                    if lFront != rFront { return !lFront && rFront }
+                }
                 if lhs.startedAt != rhs.startedAt {
                     return lhs.startedAt < rhs.startedAt
                 }

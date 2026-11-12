@@ -85,6 +85,10 @@ private struct ExpandedBody: View {
                     StateChip(state: task.state)
                     if task.state == .running {
                         TaskGlyph(kind: task.kind, spinning: true)
+                    } else if task.state == .awaitingPermission || task.state == .awaitingQuestion {
+                        Image(systemName: task.state == .awaitingQuestion ? "questionmark.bubble" : "hand.raised")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Color.white.opacity(0.85))
                     }
                 }
 

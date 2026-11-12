@@ -60,6 +60,8 @@ final class AppModel: ObservableObject {
     private var statusWorkItem: DispatchWorkItem?
     private var concealWorkItem: DispatchWorkItem?
     private var lastNotifiedCompletionID: UUID?
+    /// `taskID:state` keys already chimed for awaiting permission / question.
+    private var lastAttentionSoundKeys: Set<String> = []
     private var monitorCancellable: AnyCancellable?
     private var nowPlayingCancellable: AnyCancellable?
     private var stockCancellable: AnyCancellable?
@@ -126,6 +128,7 @@ final class AppModel: ObservableObject {
             self.objectWillChange.send()
             Task { @MainActor in
                 self.handleCompletionSideEffects()
+                self.handleAttentionSoundSideEffects()
                 self.syncNotchPresentation()
             }
         }
@@ -420,11 +423,26 @@ final class AppModel: ObservableObject {
                 body: "\(event.title) — \(event.subtitle)"
             )
         }
+        if settings.playAlertSound {
+            AlertSoundService.play()
+        }
+    }
+
+    /// Chime once when a task newly enters 等待确认 / 有提问.
+    private func handleAttentionSoundSideEffects() {
+        let keys = Set(
+            monitor.tasks
+                .filter { $0.state == .awaitingPermission || $0.state == .awaitingQuestion }
+                .map { "\($0.id):\($0.state.rawValue)" }
+        )
+        let newly = keys.subtracting(lastAttentionSoundKeys)
+        lastAttentionSoundKeys = keys
+        guard settings.playAlertSound, !newly.isEmpty else { return }
+        AlertSoundService.play()
     }
 
     private func preferredTask(from tasks: [TerminalTask]) -> TerminalTask? {
-        // Task list is oldest→newest; prefer the latest RUNNING.
-        tasks.last(where: { $0.state == .running }) ?? tasks.last ?? tasks.first
+        tasks.preferredForNotch(frontmostTTY: monitor.frontmostTTY)
     }
 
     private func scheduleCollapse() {

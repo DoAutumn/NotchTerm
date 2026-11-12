@@ -92,6 +92,20 @@ enum TerminalController {
         return merged
     }
 
+    /// Frontmost terminal's tty only when a supported terminal is the frontmost app.
+    /// Returns nil if the user is in another app (caller should keep the last known tty).
+    /// Never uses bare `tell application` without an `is running` guard (that launches apps).
+    nonisolated static func frontmostTTY() -> String? {
+        guard let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+              let app = App.from(bundleIdentifier: front),
+              isRunning(app)
+        else {
+            return nil
+        }
+        guard let tty = frontmostTTY(in: app), !tty.isEmpty else { return nil }
+        return normalizedTTY(tty)
+    }
+
     /// Focus the session that owns `tty`. Prefers the app that last listed/focused it.
     nonisolated static func activateSession(tty: String) -> Bool {
         let target = normalizedTTY(tty)
@@ -134,6 +148,42 @@ enum TerminalController {
 
     // MARK: - Per-app AppleScript
 
+    nonisolated private static func frontmostTTY(in app: App) -> String? {
+        guard isRunning(app) else { return nil }
+        let bid = app.bundleIdentifier
+        let body: String
+        switch app {
+        case .iTerm:
+            body = """
+              try
+                return tty of current session of current window
+              end try
+              return ""
+            """
+        case .ghostty:
+            body = """
+              try
+                set w to front window
+                set t to selected tab of w
+                set term to focused terminal of t
+                return tty of term
+              end try
+              return ""
+            """
+        }
+        let script = """
+        if application id "\(bid)" is running then
+          tell application id "\(bid)"
+        \(body)
+          end tell
+        end if
+        return ""
+        """
+        let raw = ShellCommand.run("/usr/bin/osascript", ["-e", script], timeout: 1.0)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return raw.isEmpty ? nil : raw
+    }
+
     nonisolated private static func listSessions(in app: App) -> [TerminalSession] {
         // Swift-side skip avoids spawning osascript when already quit.
         guard isRunning(app) else { return [] }
@@ -160,6 +210,8 @@ enum TerminalController {
               return out
             """
         case .ghostty:
+            // Prefer terminal surface title (what usually changes when switching tabs);
+            // fall back to tab name if the surface title is empty.
             body = """
               set out to ""
               set delim to ASCII character 9
@@ -168,9 +220,9 @@ enum TerminalController {
                   repeat with term in terminals of t
                     try
                       set ttyName to tty of term
-                      set sessName to name of t
+                      set sessName to name of term
                       if sessName is missing value or sessName is "" then
-                        set sessName to name of term
+                        set sessName to name of t
                       end if
                       set out to out & "TTY=" & ttyName & delim & "NAME=" & sessName & linefeed
                     end try

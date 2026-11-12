@@ -44,14 +44,16 @@ rm -rf "$BIN_DIR"/*.dSYM(N)
 if [ -d "$BIN_DIR/NotchTerm_NotchTerm.bundle" ]; then
     cp -R "$BIN_DIR/NotchTerm_NotchTerm.bundle" "$CONTENTS_PATH/Resources/"
 fi
-for asset in TrayIconTemplate.png TrayIconTemplate@2x.png TrayIconTemplate@3x.png notchterm-agent-hook.sh notchterm-shell.zsh; do
+for asset in TrayIconTemplate.png TrayIconTemplate@2x.png TrayIconTemplate@3x.png notchterm-agent-hook.sh notchterm-claude-hook.sh notchterm-shell.zsh alert-chime.wav; do
     if [ -f "$PROJECT_DIR/Sources/NotchTerm/Resources/$asset" ]; then
         cp "$PROJECT_DIR/Sources/NotchTerm/Resources/$asset" "$CONTENTS_PATH/Resources/"
     fi
 done
-if [ -f "$CONTENTS_PATH/Resources/notchterm-agent-hook.sh" ]; then
-    chmod 755 "$CONTENTS_PATH/Resources/notchterm-agent-hook.sh"
-fi
+for hook in notchterm-agent-hook.sh notchterm-claude-hook.sh; do
+    if [ -f "$CONTENTS_PATH/Resources/$hook" ]; then
+        chmod 755 "$CONTENTS_PATH/Resources/$hook"
+    fi
+done
 cp "$PROJECT_DIR/Resources/Info.plist" "$CONTENTS_PATH/Info.plist"
 
 CUSTOM_ICON="$PROJECT_DIR/AppIcon.icns"

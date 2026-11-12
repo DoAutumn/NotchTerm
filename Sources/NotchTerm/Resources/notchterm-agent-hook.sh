@@ -18,7 +18,8 @@ mkdir -p "$STATE_DIR"
 
 PAYLOAD_FILE="$(mktemp -t notchterm-hook 2>/dev/null || echo "/tmp/notchterm-hook.$$")"
 # Bounded stdin read — never hang if Cursor leaves the hook pipe open.
-python3 - "$PAYLOAD_FILE" <<'PY'
+# Use -c so stdin stays the Cursor hook JSON (a <<heredoc would steal it).
+python3 -c '
 import select, sys
 path = sys.argv[1]
 chunks = []
@@ -33,7 +34,7 @@ while True:
     chunks.append(chunk)
     deadline = 0.25  # short idle gap after first bytes
 open(path, "wb").write(b"".join(chunks))
-PY
+' "$PAYLOAD_FILE"
 
 # Find agent PID by walking parents from the hook's parent shell.
 AGENT_PID="$(
@@ -129,6 +130,7 @@ doc = {
     "conversationId": conversation_id,
     "cwd": cwd,
     "tty": tty,
+    "provider": "cursor",
 }
 
 def atomic_write(path, data):
@@ -154,6 +156,7 @@ try:
             and (old.get("conversationId") or "") == (conversation_id or "")
             and (old.get("cwd") or "") == (cwd or "")
             and (old.get("tty") or "") == (tty or "")
+            and (old.get("provider") or "cursor") == "cursor"
         )
         if same:
             age = time.time() - float(old.get("updatedAt") or 0)
@@ -179,7 +182,7 @@ if not skip or errors:
                 fh.write(f"{time.time()} write_error {' | '.join(errors)}\n")
             else:
                 fh.write(
-                    f"{time.time()} ok state={state} pid={pid} conv={conversation_id} tty={tty} cwd={cwd}\n"
+                    f"{time.time()} ok provider=cursor state={state} pid={pid} conv={conversation_id} tty={tty} cwd={cwd}\n"
                 )
     except Exception:
         pass

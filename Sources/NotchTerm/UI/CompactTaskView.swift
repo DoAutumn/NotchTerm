@@ -21,9 +21,10 @@ private struct CompactBody: View {
         _stockWatcher = ObservedObject(wrappedValue: model.stockWatcher)
     }
 
-    /// Prefer the newest running task in the compact strip.
+    /// Prefer highest-attention task; among equals prefer the frontmost terminal's task.
     private var displayTask: TerminalTask? {
-        monitor.tasks.last(where: { $0.state == .running }) ?? model.selectedTask
+        monitor.tasks.preferredForNotch(frontmostTTY: monitor.frontmostTTY)
+            ?? model.selectedTask
     }
 
     private var overflowTasks: [TerminalTask] {
@@ -100,6 +101,15 @@ private struct CompactBody: View {
 
                 if task.state == .running {
                     TaskGlyph(kind: task.kind, spinning: true)
+                } else if task.state == .awaitingPermission || task.state == .awaitingQuestion {
+                    // Match「完成」: size-8 rounded bold label, no capsule (color only differs).
+                    Text(task.state == .awaitingPermission ? "确认" : "提问")
+                        .font(.system(size: 8, weight: .bold, design: .rounded))
+                        .foregroundStyle(
+                            task.state == .awaitingPermission
+                                ? Color(red: 1.0, green: 0.72, blue: 0.28).opacity(0.95)
+                                : Color(red: 1.0, green: 0.55, blue: 0.45).opacity(0.95)
+                        )
                 } else {
                     StateChip(state: task.state, compact: true)
                 }
@@ -141,6 +151,8 @@ private struct CompactBody: View {
     private func dotColor(for state: TerminalTaskState) -> Color {
         switch state {
         case .running: return Color(red: 0.55, green: 0.72, blue: 1.0)
+        case .awaitingPermission: return Color(red: 1.0, green: 0.72, blue: 0.28)
+        case .awaitingQuestion: return Color(red: 1.0, green: 0.55, blue: 0.45)
         case .idle: return .orange
         case .completed: return .green
         }
@@ -265,6 +277,8 @@ struct StateChip: View {
     private var shortLabel: String {
         switch state {
         case .running: return "运行"
+        case .awaitingPermission: return "确认"
+        case .awaitingQuestion: return "提问"
         case .idle: return "空闲"
         case .completed: return "完成"
         }
@@ -273,6 +287,8 @@ struct StateChip: View {
     private var color: Color {
         switch state {
         case .running: return Color(red: 0.55, green: 0.72, blue: 1.0)
+        case .awaitingPermission: return Color(red: 1.0, green: 0.72, blue: 0.28)
+        case .awaitingQuestion: return Color(red: 1.0, green: 0.55, blue: 0.45)
         case .idle: return Color.orange.opacity(0.95)
         case .completed: return .green
         }
@@ -307,6 +323,8 @@ struct TabCapsule: View {
     private var dotColor: Color {
         switch task.state {
         case .running: return Color(red: 0.55, green: 0.72, blue: 1.0)
+        case .awaitingPermission: return Color(red: 1.0, green: 0.72, blue: 0.28)
+        case .awaitingQuestion: return Color(red: 1.0, green: 0.55, blue: 0.45)
         case .idle: return .orange
         case .completed: return .green
         }

@@ -31,6 +31,10 @@ private struct GeneralSettingsTab: View {
         Form {
             Section("通用") {
                 Toggle("登录时启动", isOn: $model.settings.launchAtLogin)
+                Toggle("声音提醒", isOn: $model.settings.playAlertSound)
+                Text("任务完成、等待确认、有提问时播放提示音。")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
                 Toggle("任务完成时通知", isOn: $model.settings.notifyOnComplete)
                 Toggle("在全屏应用上方显示", isOn: $model.settings.showOnFullscreen)
                 Text("开启后，其他应用全屏（如视频、Keynote）时刘海仍可见；关闭则全屏期间隐藏。")
